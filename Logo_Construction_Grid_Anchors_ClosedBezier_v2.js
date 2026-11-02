@@ -2367,7 +2367,9 @@ function enrichGeometryAnalysis(polyCurve, geom) {
       curveWeight: localSamples.filter(sample => sample.source === "curve").reduce((sum, sample) => sum + sample.weight, 0),
       diagonal: Math.max(Number.EPSILON * 100, Math.hypot(localBounds.width, localBounds.height))
     };
-    const localFamilies = detectDirectionFamilies(localEvidence, localAngle);
+    const localFamilies = localSamples.length
+      ? detectDirectionFamilies(localEvidence, localAngle)
+      : [];
     const localGeometry = {
       bounds: localBounds,
       anchors: localAnchors,
