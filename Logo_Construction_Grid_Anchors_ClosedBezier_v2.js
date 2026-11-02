@@ -746,6 +746,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
   const rawHandles = [], straightSegments = [], directionSegments = [], rawCircles = [], landmarkRecords = [], topologyRecords = [];
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let realCurveSegments = 0;
+  let straightSegmentTotal = 0, contourSegmentTotal = 0, openContourTotal = 0;
 
   function updateBounds(p) {
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
@@ -760,6 +761,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     const beziers = collectBeziers(curve);
     const closedContour = isCurveClosed(curve, beziers);
     if (closedContour) closedContourTotal++;
+    else openContourTotal++;
     const firstContourPoint = beziers.length ? beziers[0].start : null;
     const lastContourPoint = beziers.length ? beziers[beziers.length - 1].end : null;
     const contourSeamLength = firstContourPoint && lastContourPoint ? dist(firstContourPoint, lastContourPoint) : Infinity;
@@ -770,6 +772,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     let contourScale = 1;
 
     for (let bIdx = 0; bIdx < beziers.length; bIdx++) {
+      contourSegmentTotal++;
       const b = beziers[bIdx];
       updateBounds(b.start); updateBounds(b.end);
       contourPoints.push(b.start);
@@ -808,7 +811,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
       const isSegmentStraight = referenceLength > 1e-10 && h1 < straightTolerance && h2 < straightTolerance;
 
       if (isSegmentStraight) {
-        if (chord >= 1.0) {
+        straightSegmentTotal++;
+        if (chord >= Math.max(controlScale * 1e-3, Number.EPSILON)) {
           const angle = canonicalLineAngle(Math.atan2(b.end.y - b.start.y, b.end.x - b.start.x));
           const seg = { p1: b.start, p2: b.end, angle: angle, length: chord, importance: 85 };
           straightSegments.push(seg);
@@ -995,8 +999,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
         // The implicit closing edge also contributes to direction analysis
         // and to polygonal/radial construction, but very short closures are
         // not promoted to visible straight-edge guides.
-        if (seamLength >= 0.5) directionSegments.push({ p1: last, p2: first });
-        if (seamLength >= 1.0) {
+        if (seamLength >= contourScale * 5e-4) directionSegments.push({ p1: last, p2: first });
+        if (seamLength >= contourScale * 1e-3) {
           const closure = {
             p1: last,
             p2: first,
@@ -1031,6 +1035,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     width: isFinite(maxX - minX) ? maxX - minX : 100,
     height: isFinite(maxY - minY) ? maxY - minY : 100
   };
+  const geometryScale = createGeometryScaleContext(bounds);
+  const featureLengthFloor = geometryScale.featureLength;
   const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
 
   // Identificação topológica de pétalas e cortes (caso existam formas poligonais)
@@ -1053,7 +1059,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
       const pIn = (d1 <= d2) ? e.p1 : e.p2;
       const pOut = (d1 <= d2) ? e.p2 : e.p1;
       const len = dist(pIn, pOut);
-      if (len < 1.0) continue;
+      if (len < featureLengthFloor) continue;
       const ux = (pOut.x - pIn.x) / len;
       const uy = (pOut.y - pIn.y) / len;
       radialEdges.push({ pIn, pOut, len, dir: { x: ux, y: uy }, angle: canonicalLineAngle(Math.atan2(uy, ux)) });
@@ -1062,7 +1068,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     // As 2 arestas curtas de fecho são transversais (cortes das pontas)
     for (const e of sortedEdges.slice(2, 4)) {
       const len = dist(e.p1, e.p2);
-      if (len < 1.0) continue;
+      if (len < featureLengthFloor) continue;
       const tx = (e.p2.x - e.p1.x) / len;
       const ty = (e.p2.y - e.p1.y) / len;
       capEdges.push({ p1: e.p1, p2: e.p2, len, dir: { x: tx, y: ty }, angle: canonicalLineAngle(Math.atan2(ty, tx)) });
@@ -1104,7 +1110,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     let maxGap = 0, splitIdx = -1;
     for (let i = 0; i < petalData.length - 1; i++) {
       const g = petalData[i + 1].rMid - petalData[i].rMid;
-      if (g > maxGap && g > 15.0) { maxGap = g; splitIdx = i; }
+      if (g > maxGap && g > geometryScale.diagonal * 0.02) { maxGap = g; splitIdx = i; }
     }
     if (splitIdx >= 0) {
       innerBand = petalData.slice(0, splitIdx + 1);
@@ -1226,6 +1232,11 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     landmarks: landmarkRecords,
     anchorMergeTolerance: anchorMergeTolerance,
     closedContourCount: closedContourTotal,
+    openContourCount: openContourTotal,
+    contourCount: polyCurve.curveCount,
+    curveSegmentCount: realCurveSegments,
+    straightSegmentCount: straightSegmentTotal,
+    totalSegmentCount: contourSegmentTotal,
     radialPetalCandidateCount: closedPetals.length,
     featureCount: adaptiveAnchors.length + adaptiveHandles.length + uniqueCircles.length
   };
@@ -2141,6 +2152,31 @@ function refineCircleCandidates(rawCircles, bounds) {
   return { circles: limitedCircles, families, relationCount };
 }
 
+function classifyGeometryProfile(geom) {
+  const totalSegments=Math.max(1,geom.totalSegmentCount||0);
+  const straightRatio=clamp((geom.straightSegmentCount||0)/totalSegments,0,1);
+  const curveRatio=clamp((geom.curveSegmentCount||0)/totalSegments,0,1);
+  const contourTotal=Math.max(1,geom.contourCount||1);
+  const openRatio=clamp((geom.openContourCount||0)/contourTotal,0,1);
+  const width=Math.max(Number.EPSILON,geom.bounds.width||0);
+  const height=Math.max(Number.EPSILON,geom.bounds.height||0);
+  const aspect=Math.max(width,height)/Math.min(width,height);
+  const symmetry=clamp((geom.symmetry&&geom.symmetry.score)||0,0,1);
+  const moduleConfidence=clamp((geom.modules&&geom.modules.confidence)||0,0,1);
+  const circleCount=(geom.circleFamilies||[]).filter(f=>f&&f.confidence>=0.55&&f.circles&&f.circles.length>=2).length;
+  const circleSignal=clamp(circleCount/2,0,1);
+  const multiContour=clamp(((geom.contourCount||0)-1)/4,0,1);
+  const scores={
+    geometric:clamp(0.24*straightRatio+0.24*symmetry+0.24*moduleConfidence+0.20*circleSignal+0.08*(1-openRatio),0,1),
+    typographic:clamp(0.20*clamp((aspect-1.1)/2.4,0,1)+0.25*multiContour+0.18*straightRatio+0.17*curveRatio+0.20*(1-openRatio),0,1),
+    handwriting:clamp(0.38*openRatio+0.30*curveRatio+0.18*(1-symmetry)+0.14*(1-straightRatio),0,1),
+    organic:clamp(0.48*curveRatio+0.24*(1-symmetry)+0.16*(1-moduleConfidence)+0.12*(1-circleSignal),0,1),
+    radial:geom.isRadialArray?1:clamp(0.35*moduleConfidence+0.25*circleSignal+0.20*symmetry+0.20*straightRatio,0,0.69)
+  };
+  const ranked=Object.keys(scores).sort((a,b)=>scores[b]-scores[a]);
+  return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour}};
+}
+
 function enrichGeometryAnalysis(polyCurve, geom) {
   const evidence = collectDirectionEvidence(polyCurve, geom);
   const families = detectDirectionFamilies(evidence, geom.dominantAngle);
@@ -2156,6 +2192,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.circleFamilies = circleAnalysis.families;
   geom.displayCircles = circleAnalysis.circles;
   geom.circleRelationCount = circleAnalysis.relationCount;
+  geom.profile = classifyGeometryProfile(geom);
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
   }
@@ -2388,6 +2425,14 @@ function main() {
   attachTip(showAnchorsSwitch, "Exibe os vértices e nós vetoriais reais da geometria.");
 
   const gridGrp = colLeft.addGroup("2. Smart Geometry & Grid");
+  const analysisProfileCombo = gridGrp.addComboBox("Analysis Profile", [
+    "Automatic (" + initialGeom.profile.suggested + ")",
+    "Geometric Symbol",
+    "Typographic / Letterform",
+    "Handwriting / Lettering",
+    "Organic / Freeform",
+    "Radial / Repeating"
+  ], 0);
   const gridModeCombo = gridGrp.addComboBox("Grid Alignment", [
     "Smart Adaptive (Dominant Angle)",
     "Radial Outward Projections (Brand Guidelines)",
@@ -2411,6 +2456,7 @@ function main() {
   const showLandmarksSwitch = gridGrp.addSwitch("Geometric Landmarks", false);
   const showInflectionSwitch = gridGrp.addSwitch("Inflection Points", initialHasInflections);
 
+  attachTip(analysisProfileCombo, "Perfil sugerido por métricas geométricas: " + initialGeom.profile.suggested + ". A escolha automática é heurística. Os perfis manuais alteram a selecção de guias, mas não fazem reconhecimento semântico de letras.");
   attachTip(gridModeCombo, "Smart Adaptive combina famílias de direcções suportadas por arestas e tangentes Bézier. Evita impor uma única orientação a logótipos com várias estruturas.");
   attachTip(nodeDisplayCombo, "Controla quais nós são destacados. A análise conserva nós distintos mesmo em curvas muito fechadas; Auto reduz apenas marcadores de baixa prioridade quando há pouco espaço.");
   attachTip(adaptiveScaleSwitch, "Reduz automaticamente marcadores e suprime linhas em áreas densas para evitar poluição visual.");
@@ -2793,29 +2839,40 @@ function main() {
         const preciseAngle = initialPreciseAngle;
         const alignmentTolerance = Math.max(Number.EPSILON * 100, effectiveMergeDistance);
         const directionFamilies = (geom.directionFamilies || []).slice(0, 4);
+        const profileIds = ["geometric","typographic","handwriting","organic","radial"];
+        const selectedProfile = analysisProfileCombo.selectedIndex === 0
+          ? geom.profile.suggested
+          : profileIds[analysisProfileCombo.selectedIndex - 1] || geom.profile.suggested;
+        const profileAlignmentPoints = selectedProfile === "typographic" ? geom.anchors : alignmentPoints;
 
         if (gridMode === 0) {
-          // Smart Adaptive combines independent structural-edge and Bézier-tangent
-          // families. A curved path can contribute valid directions without one
-          // dominant straight segment suppressing all other orientations.
-          const selectedFamilies = directionFamilies.slice(0, 3);
+          // Each profile limits which directions may become full-frame guides.
+          let selectedFamilies = directionFamilies.slice(0, 3);
+          if (selectedProfile === "handwriting") {
+            selectedFamilies = directionFamilies.filter(f => f.straightSupport > 0 && f.share >= 0.16).slice(0, 1);
+          } else if (selectedProfile === "organic") {
+            selectedFamilies = directionFamilies.filter(f => f.straightSupport > 0 && f.confidence >= 0.62 && f.share >= 0.13).slice(0, 1);
+          } else if (selectedProfile === "typographic") {
+            selectedFamilies = directionFamilies.slice(0, 2);
+          }
           if (selectedFamilies.length) {
             selectedFamilies.forEach((family, index) => {
               const familyBoost = Math.min(10, (family.confidence || 0) * 10);
               addAlignmentLineCandidates(
-                alignmentPoints, gridOrigin, family.angle, alignmentTolerance,
-                candidates, 30 + familyBoost - index * 2.5, "direction-family-alignment"
+                profileAlignmentPoints, gridOrigin, family.angle, alignmentTolerance,
+                candidates, (selectedProfile === "typographic" ? 42 : 30) + familyBoost - index * 2.5, "direction-family-alignment"
               );
-              // The perpendicular is retained only when supported by the actual
-              // projected geometry; its lower ranking prevents artificial grids.
-              addAlignmentLineCandidates(
-                alignmentPoints, gridOrigin, family.angle + Math.PI / 2, alignmentTolerance,
-                candidates, 25 + familyBoost - index * 2.5, "direction-family-perpendicular"
-              );
+              // Handwriting and organic forms do not inherit a perpendicular lattice.
+              if (selectedProfile !== "handwriting" && selectedProfile !== "organic") {
+                addAlignmentLineCandidates(
+                  profileAlignmentPoints, gridOrigin, family.angle + Math.PI / 2, alignmentTolerance,
+                  candidates, (selectedProfile === "typographic" ? 38 : 25) + familyBoost - index * 2.5, "direction-family-perpendicular"
+                );
+              }
             });
-          } else {
-            addAlignmentLineCandidates(alignmentPoints, gridOrigin, preciseAngle, alignmentTolerance, candidates, 32, "dominant-alignment");
-            addAlignmentLineCandidates(alignmentPoints, gridOrigin, preciseAngle + Math.PI / 2, alignmentTolerance, candidates, 29, "perpendicular-alignment");
+          } else if (selectedProfile !== "handwriting" && selectedProfile !== "organic") {
+            addAlignmentLineCandidates(profileAlignmentPoints, gridOrigin, preciseAngle, alignmentTolerance, candidates, 32, "dominant-alignment");
+            addAlignmentLineCandidates(profileAlignmentPoints, gridOrigin, preciseAngle + Math.PI / 2, alignmentTolerance, candidates, 29, "perpendicular-alignment");
           }
 
           // Preserve substantial straight edges. Very short edges often belong
@@ -2873,7 +2930,7 @@ function main() {
           });
         }
 
-        if (showModulesSwitch.value && geom.modules && Array.isArray(geom.modules.axes)) {
+        if (showModulesSwitch.value && selectedProfile !== "handwriting" && geom.modules && Array.isArray(geom.modules.axes)) {
           // Only high-confidence systems are promoted to construction modules.
           // Their phase comes from the measured anchor/landmark positions.
           for (const axis of geom.modules.axes.slice(0, 2)) {
@@ -2893,7 +2950,8 @@ function main() {
         // Merge tolerance also provides a restrained detail control: larger
         // values remove near-duplicate candidates and lower the guide budget.
         const detailFactor = clamp(1.18 - mergeDistCtrl.value * 0.0062, 0.56, 1.12);
-        const baseGuideBudget = gridMode === 2 ? 28 : (gridMode === 3 ? 22 : 20);
+        const profileBudget = selectedProfile === "handwriting" ? 9 : (selectedProfile === "organic" ? 12 : (selectedProfile === "typographic" ? 24 : 20));
+        const baseGuideBudget = gridMode === 2 ? 28 : (gridMode === 3 ? 22 : profileBudget);
         const guideBudget = Math.max(10, Math.round(baseGuideBudget * detailFactor));
         for (const line of cleanLines.slice(0, guideBudget)) {
           const clipBounds = (line.source === "bounding-box-edge" || line.source === "bounding-box-diagonal")
@@ -3005,7 +3063,7 @@ function main() {
 
   // Event Listeners Reativos para Live Preview
   [
-    gridModeCombo, nodeDisplayCombo, reachModeCombo, tangentSourceCombo, anchorStyleCombo,
+    analysisProfileCombo, gridModeCombo, nodeDisplayCombo, reachModeCombo, tangentSourceCombo, anchorStyleCombo,
     handleStyleCombo, landmarkStyleCombo, stemScaleCombo, handleScalingCombo
   ].forEach(c => {
     try { c.setOnValueChangedHandler(() => render(true)); } catch (e) {}
