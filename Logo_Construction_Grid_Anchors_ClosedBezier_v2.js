@@ -1014,6 +1014,15 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       // chord as proof that the segment is straight.
       const isSegmentStraight = referenceLength > 1e-10 && h1 < straightTolerance && h2 < straightTolerance;
 
+      // Circle fitting is independent from the straight-edge classification.
+      // A small curved Bézier must still be eligible for arc/ring detection even
+      // when its scale makes the straightness tolerance classify it as an edge.
+      const circularFit = fitCircleToBezier(b);
+      if (circularFit) {
+        circularFit.componentId = componentId;
+        rawCircles.push(circularFit);
+      }
+
       if (isSegmentStraight) {
         straightSegmentTotal++;
         if (componentMetric) componentMetric.straightSegmentCount++;
@@ -1027,11 +1036,6 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       } else {
         realCurveSegments++;
         if (componentMetric) componentMetric.curveSegmentCount++;
-        const circ = fitCircleToBezier(b);
-        if (circ) {
-          circ.componentId = componentId;
-          rawCircles.push(circ);
-        }
         const mid = cubicPoint(b, 0.5);
         directionSegments.push({ p1: b.start, p2: mid });
         directionSegments.push({ p1: mid, p2: b.end });
