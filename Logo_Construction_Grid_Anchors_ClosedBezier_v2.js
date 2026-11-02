@@ -654,6 +654,7 @@ function buildAnchorTopology(records, mergeTolerance) {
       sourceContours: [],
       sourceSegments: [],
       topologyKey: record && record.topologyKey !== undefined ? record.topologyKey : null,
+      componentIds: [],
       coordinateDriftMax: 0
     };
     anchors.push(anchor);
@@ -720,7 +721,8 @@ function buildAnchorTopology(records, mergeTolerance) {
     anchor.endpoint = anchor.endpoint || !!r.endpoint;
     anchor.closedContour = anchor.closedContour || !!r.closedContour;
     if (Number.isInteger(r.contourIndex) && anchor.sourceContours.indexOf(r.contourIndex) < 0) anchor.sourceContours.push(r.contourIndex);
-    if (Number.isInteger(r.segmentIndex)) anchor.sourceSegments.push({ contour: r.contourIndex, segment: r.segmentIndex });
+    if (Number.isInteger(r.componentId) && anchor.componentIds.indexOf(r.componentId) < 0) anchor.componentIds.push(r.componentId);
+    if (Number.isInteger(r.segmentIndex)) anchor.sourceSegments.push({ contour: r.contourIndex, segment: r.segmentIndex, componentId: r.componentId });
   }
   return anchors;
 }
@@ -816,11 +818,25 @@ function featureImportanceForAnchor(a) {
 }
 
 // Analisador geométrico universal de alta fidelidade
-function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
+function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, componentModel) {
   const rawHandles = [], straightSegments = [], directionSegments = [], rawCircles = [], landmarkRecords = [], topologyRecords = [];
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   let realCurveSegments = 0;
   let straightSegmentTotal = 0, contourSegmentTotal = 0, openContourTotal = 0;
+  const componentMetrics = ((componentModel && componentModel.components) || []).map(component => ({
+    id: component.id, label: component.label, depth: component.depth,
+    parentGroupIds: component.parentGroupIds || [], curveStart: component.curveStart,
+    curveCount: component.curveCount, bounds: component.bounds || null,
+    contourCount: 0, closedContourCount: 0, openContourCount: 0,
+    straightSegmentCount: 0, curveSegmentCount: 0, anchorCount: 0, handleCount: 0
+  }));
+  function componentForCurve(curveIndex) {
+    for (const component of componentMetrics) {
+      if (curveIndex >= component.curveStart &&
+          curveIndex < component.curveStart + component.curveCount) return component.id;
+    }
+    return -1;
+  }
 
   function updateBounds(p) {
     minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
@@ -832,8 +848,15 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
 
   for (let c = 0; c < polyCurve.curveCount; c++) {
     const curve = polyCurve.at(c);
+    const componentId = componentForCurve(c);
+    const componentMetric = componentMetrics.find(item => item.id === componentId) || null;
     const beziers = collectBeziers(curve);
     const closedContour = isCurveClosed(curve, beziers);
+    if (componentMetric) {
+      componentMetric.contourCount++;
+      if (closedContour) componentMetric.closedContourCount++;
+      else componentMetric.openContourCount++;
+    }
     if (closedContour) closedContourTotal++;
     else openContourTotal++;
     const firstContourPoint = beziers.length ? beziers[0].start : null;
@@ -886,17 +909,22 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
 
       if (isSegmentStraight) {
         straightSegmentTotal++;
+        if (componentMetric) componentMetric.straightSegmentCount++;
         if (chord >= Math.max(controlScale * 1e-3, Number.EPSILON)) {
           const angle = canonicalLineAngle(Math.atan2(b.end.y - b.start.y, b.end.x - b.start.x));
-          const seg = { p1: b.start, p2: b.end, angle: angle, length: chord, importance: 85 };
+          const seg = { p1: b.start, p2: b.end, angle: angle, length: chord, importance: 85, componentId };
           straightSegments.push(seg);
-          directionSegments.push({ p1: b.start, p2: b.end });
+          directionSegments.push({ p1: b.start, p2: b.end, componentId });
           contourEdges.push(seg);
         }
       } else {
         realCurveSegments++;
+        if (componentMetric) componentMetric.curveSegmentCount++;
         const circ = fitCircleToBezier(b);
-        if (circ) rawCircles.push(circ);
+        if (circ) {
+          circ.componentId = componentId;
+          rawCircles.push(circ);
+        }
         const mid = cubicPoint(b, 0.5);
         directionSegments.push({ p1: b.start, p2: mid });
         directionSegments.push({ p1: mid, p2: b.end });
@@ -906,7 +934,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           rawHandles.push({
             anchor: b.start, handle: b.c1, length: dC1,
             importance: Math.min(100, 35 + dC1 * 0.5),
-            contourIndex: c, segmentIndex: bIdx, controlSide: "outgoing",
+            contourIndex: c, segmentIndex: bIdx, componentId, controlSide: "outgoing",
             anchorTopologyKey: c + ":vertex:" + bIdx,
             closedContour
           });
@@ -915,7 +943,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           rawHandles.push({
             anchor: b.end, handle: b.c2, length: dC2,
             importance: Math.min(100, 35 + dC2 * 0.5),
-            contourIndex: c, segmentIndex: bIdx, controlSide: "incoming",
+            contourIndex: c, segmentIndex: bIdx, componentId, controlSide: "incoming",
             anchorTopologyKey: c + ":vertex:" + endVertexIndex,
             closedContour
           });
@@ -930,7 +958,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           const d = cubicDerivative(b, t);
           landmarkRecords.push({
             x: p.x, y: p.y, type: "extrema", importance: 70,
-            contourIndex: c, segmentIndex: bIdx, t,
+            contourIndex: c, componentId, segmentIndex: bIdx, t,
             tangentAngle: Math.atan2(d.y, d.x),
             curvature: bezierCurvatureAt(b, t)
           });
@@ -943,7 +971,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           const d = cubicDerivative(b, t);
           landmarkRecords.push({
             x: p.x, y: p.y, type: "inflection", importance: 45,
-            contourIndex: c, segmentIndex: bIdx, t,
+            contourIndex: c, componentId, segmentIndex: bIdx, t,
             tangentAngle: Math.atan2(d.y, d.x),
             curvature: 0
           });
@@ -981,7 +1009,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
               turnAngle: classification.turnAngle,
               incomingTangent: classification.incomingTangent,
               outgoingTangent: classification.outgoingTangent,
-              contourIndex: c, segmentIndex: bIdx, t,
+              contourIndex: c, componentId, segmentIndex: bIdx, t,
               curvature: bezierCurvatureAt(b, t)
             });
           }
@@ -1004,6 +1032,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
         endpoint: !closedContour && bIdx === 0,
         closedContour,
         contourIndex: c,
+        componentId,
         segmentIndex: bIdx,
         topologyKey: c + ":vertex:" + bIdx
       });
@@ -1017,6 +1046,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
         endpoint: !closedContour && bIdx === beziers.length - 1,
         closedContour,
         contourIndex: c,
+        componentId,
         segmentIndex: bIdx,
         topologyKey: c + ":vertex:" + endVertexIndex
       });
@@ -1053,6 +1083,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           endpoint: false,
           closedContour: true,
           contourIndex: c,
+          componentId,
           segmentIndex: beziers.length,
           topologyKey: c + ":vertex:" + beziers.length
         });
@@ -1066,6 +1097,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
           endpoint: false,
           closedContour: true,
           contourIndex: c,
+          componentId,
           segmentIndex: -1,
           topologyKey: c + ":vertex:0"
         });
@@ -1081,7 +1113,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
             angle: canonicalLineAngle(seamAngle),
             length: seamLength,
             importance: 85,
-            implicitClosure: true
+            implicitClosure: true,
+            componentId
           };
           straightSegments.push(closure);
           contourEdges.push(closure);
@@ -1092,7 +1125,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     // Only truly closed contours feed the radial-petal analyser. Open paths
     // with three or more segments must not be mistaken for closed petals.
     if (closedContour && contourPoints.length >= 3) {
-      closedPetals.push({ pts: contourPoints, edges: contourEdges });
+      closedPetals.push({ pts: contourPoints, edges: contourEdges, componentId });
     }
   }
 
@@ -1277,15 +1310,21 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
       ? Math.max(minDotR, Math.min(baseDotR, localClearance * 0.22))
       : baseDotR;
 
+    if (componentMetric) componentMetric.handleCount++;
     adaptiveHandles.push({
       anchor: h.anchor,
       handle: h.handle,
+      componentId: h.componentId,
       dotRadius: calculatedDotR,
       baseLength: h.length,
       importance: h.importance,
       clearance: localClearance,
       priority: h.importance
     });
+  }
+
+  for (const component of componentMetrics) {
+    component.anchorCount = adaptiveAnchors.filter(a => a.componentIds && a.componentIds.indexOf(component.id) !== -1).length;
   }
 
   return {
@@ -1312,7 +1351,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     straightSegmentCount: straightSegmentTotal,
     totalSegmentCount: contourSegmentTotal,
     radialPetalCandidateCount: closedPetals.length,
-    featureCount: adaptiveAnchors.length + adaptiveHandles.length + uniqueCircles.length
+    featureCount: adaptiveAnchors.length + adaptiveHandles.length + uniqueCircles.length,
+    componentMetrics
   };
 }
 
@@ -1615,6 +1655,26 @@ function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves
 // Seleção visual dos handles: conserva as coordenadas Bézier reais, reduz
 // marcadores quando existe espaço e omite os que inevitavelmente colidiriam.
 // Isto afeta apenas a apresentação, nunca a geometria da curva original.
+function projectHandlePositions(handles, multiplier) {
+  const factor = Math.max(1, Number(multiplier) || 1);
+  return (handles || []).map(h => {
+    const dx = h.handle.x - h.anchor.x;
+    const dy = h.handle.y - h.anchor.y;
+    const actualLength = Math.hypot(dx, dy);
+    const originalHandle = { x: h.handle.x, y: h.handle.y };
+    if (actualLength <= EPS || factor <= 1 + 1e-9) {
+      return Object.assign({}, h, { originalHandle, stemProjected: false });
+    }
+    const ux = dx / actualLength, uy = dy / actualLength;
+    const projectedLength = actualLength * factor;
+    return Object.assign({}, h, {
+      originalHandle,
+      handle: { x: h.anchor.x + ux * projectedLength, y: h.anchor.y + uy * projectedLength },
+      stemProjected: true
+    });
+  });
+}
+
 function buildCollisionSafeHandles(handles, anchors, baseHandleSize, allowScaling) {
   if (!handles || handles.length === 0) return [];
 
@@ -2248,15 +2308,19 @@ function classifyGeometryProfile(geom) {
   const multiContour=clamp(((geom.contourCount||0)-1)/4,0,1);
   const componentCount = Math.max(1, (geom.componentModel && geom.componentModel.componentCount) || 1);
   const componentSignal = clamp((componentCount - 1) / 5, 0, 1);
+  const componentDirectionSignal = clamp(
+    ((geom.componentAnalysis || []).filter(c => c.localStraightEdgeCount >= 2).length) / Math.max(1, componentCount),
+    0, 1
+  );
   const scores={
     geometric:clamp(0.24*straightRatio+0.24*symmetry+0.24*moduleConfidence+0.20*circleSignal+0.08*(1-openRatio),0,1),
-    typographic:clamp(0.16*clamp((aspect-1.1)/2.4,0,1)+0.20*multiContour+0.20*componentSignal+0.16*straightRatio+0.14*curveRatio+0.14*(1-openRatio),0,1),
+    typographic:clamp(0.14*clamp((aspect-1.1)/2.4,0,1)+0.18*multiContour+0.18*componentSignal+0.16*componentDirectionSignal+0.14*straightRatio+0.10*curveRatio+0.10*(1-openRatio),0,1),
     handwriting:clamp(0.38*openRatio+0.30*curveRatio+0.18*(1-symmetry)+0.14*(1-straightRatio),0,1),
     organic:clamp(0.48*curveRatio+0.24*(1-symmetry)+0.16*(1-moduleConfidence)+0.12*(1-circleSignal),0,1),
     radial:geom.isRadialArray?1:0
   };
   const ranked=Object.keys(scores).sort((a,b)=>scores[b]-scores[a]);
-  return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour,componentCount,componentSignal}};
+  return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour,componentCount,componentSignal,componentDirectionSignal}};
 }
 
 function enrichGeometryAnalysis(polyCurve, geom) {
@@ -2278,6 +2342,21 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
   }
+  geom.componentAnalysis = (geom.componentMetrics || []).map(component => {
+    const localAnchors = (geom.anchors || []).filter(a =>
+      a.componentIds && a.componentIds.indexOf(component.id) !== -1
+    );
+    const localEdges = (geom.straightSegments || []).filter(edge => edge.componentId === component.id);
+    const localAngle = localEdges.length ? detectDominantDirection(localEdges) : geom.dominantAngle;
+    const localSymmetry = localAnchors.length >= 3
+      ? detectAxisSymmetry(localAnchors, localAngle)
+      : { score: 0, axis: localAngle, longitudinal: 0, transverse: 0 };
+    return Object.assign({}, component, {
+      localDominantAngle: localAngle,
+      localSymmetry,
+      localStraightEdgeCount: localEdges.length
+    });
+  });
   geom.proportionRelations = [];
   for (const axis of moduleSystems.axes) {
     for (const ratio of (axis.ratios || [])) {
@@ -2446,7 +2525,7 @@ function main() {
     if (ext && ext.width > 0) spreadExtents = ext;
   } catch (e) {}
 
-  const initialBaseGeometry = analyzeSmartGeometry(polyCurve, 9, 9);
+  const initialBaseGeometry = analyzeSmartGeometry(polyCurve, 9, 9, componentModel);
   initialBaseGeometry.componentModel = componentModel;
   const initialGeom = enrichGeometryAnalysis(polyCurve, initialBaseGeometry);
   const initialExactBounds = getExactCurveBounds(polyCurve) || initialGeom.bounds;
@@ -2601,7 +2680,7 @@ function main() {
   function getCachedGeometry(anchorSize, handleSize) {
     const key = String(anchorSize) + "|" + String(handleSize);
     if (!geometryCache[key]) {
-      const baseGeometry = analyzeSmartGeometry(polyCurve, anchorSize, handleSize);
+      const baseGeometry = analyzeSmartGeometry(polyCurve, anchorSize, handleSize, componentModel);
       baseGeometry.componentModel = componentModel;
       geometryCache[key] = enrichGeometryAnalysis(polyCurve, baseGeometry);
     }
@@ -2700,27 +2779,7 @@ function main() {
       displayHandles = displayHandles.map(h => Object.assign({}, h, { dotRadius: baseDot }));
     }
 
-    const projectedHandles = displayHandles.map(h => {
-      const dx = h.handle.x - h.anchor.x;
-      const dy = h.handle.y - h.anchor.y;
-      const actualLength = Math.hypot(dx, dy);
-      if (actualLength <= EPS) {
-        return Object.assign({}, h, {
-          originalHandle: { x: h.handle.x, y: h.handle.y },
-          stemProjected: false
-        });
-      }
-      const ux = dx / actualLength, uy = dy / actualLength;
-      const projectedLength = actualLength * Math.max(1, stemMultiplier);
-      return Object.assign({}, h, {
-        originalHandle: { x: h.handle.x, y: h.handle.y },
-        handle: {
-          x: h.anchor.x + ux * projectedLength,
-          y: h.anchor.y + uy * projectedLength
-        },
-        stemProjected: projectedLength > actualLength + EPS
-      });
-    });
+    const projectedHandles = projectHandlePositions(displayHandles, stemMultiplier);
 
     // Os handles usados nas guias geométricas continuam completos. A filtragem
     // seguinte é exclusiva da camada visual de hastes e pontos de controlo.
