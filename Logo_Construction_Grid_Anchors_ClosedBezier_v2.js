@@ -617,7 +617,91 @@ function fitCircleToBezier(b) {
   const allowedDev = Math.max(controlSpan * 1e-5, r * 0.022);
   if (maxDev > allowedDev) return null;
 
-  return { cx, cy, r, confidence: 1 - (maxDev / allowedDev) };
+  const startAngle = Math.atan2(b.start.y - cy, b.start.x - cx);
+  const endAngle = Math.atan2(b.end.y - cy, b.end.x - cx);
+  const midpoint = cubicPoint(b, 0.5);
+  const tangent = bezierDerivative(b, 0.5);
+  const orientation = cross(midpoint.x - cx, midpoint.y - cy, tangent.x, tangent.y);
+  const tau = Math.PI * 2;
+  const positiveSweep = ((endAngle - startAngle) % tau + tau) % tau;
+  let sweep = orientation >= 0 ? positiveSweep : positiveSweep - tau;
+  if (Math.abs(sweep) <= 1e-7 && closedCubic) sweep = orientation >= 0 ? tau : -tau;
+  if (!Number.isFinite(sweep) || Math.abs(sweep) <= 1e-7) return null;
+
+  return {
+    cx, cy, r,
+    confidence: 1 - (maxDev / allowedDev),
+    startAngle,
+    sweep
+  };
+}
+
+function buildDisplayArcCandidates(rawCandidates, bounds) {
+  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
+  const minRadius = diagonal * 0.0035;
+  const maxRadius = diagonal * 2.25;
+  const centreMargin = diagonal * 1.25;
+  const centreTolerance = diagonal * 0.0005;
+  const arcs = [];
+
+  for (const candidate of (rawCandidates || [])) {
+    if (!candidate || !Number.isFinite(candidate.cx) || !Number.isFinite(candidate.cy) ||
+        !Number.isFinite(candidate.r) || !Number.isFinite(candidate.startAngle) ||
+        !Number.isFinite(candidate.sweep)) continue;
+    if (candidate.r < minRadius || candidate.r > maxRadius) continue;
+    if (Math.abs(candidate.sweep) <= 1e-5 || Math.abs(candidate.sweep) > Math.PI * 2 + 1e-5) continue;
+    if ((candidate.confidence || 0) < 0.16) continue;
+    if (candidate.cx < bounds.x - centreMargin || candidate.cx > bounds.x + bounds.width + centreMargin ||
+        candidate.cy < bounds.y - centreMargin || candidate.cy > bounds.y + bounds.height + centreMargin) continue;
+
+    const duplicate = arcs.some(existing =>
+      dist(existing, candidate) <= centreTolerance &&
+      Math.abs(existing.r - candidate.r) <= Math.max(diagonal * 0.0006, candidate.r * 0.022) &&
+      Math.abs(existing.startAngle - candidate.startAngle) <= 1.0 * DEG &&
+      Math.abs(existing.sweep - candidate.sweep) <= 1.0 * DEG
+    );
+    if (!duplicate) arcs.push({
+      cx: candidate.cx,
+      cy: candidate.cy,
+      r: candidate.r,
+      startAngle: candidate.startAngle,
+      sweep: candidate.sweep,
+      confidence: candidate.confidence,
+      componentId: candidate.componentId
+    });
+  }
+
+  arcs.sort((a,b) => b.confidence - a.confidence);
+  return arcs.slice(0, 120);
+}
+
+function makeCircularArcPoly(cx, cy, radius, startAngle, sweep) {
+  if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(sweep) || Math.abs(sweep) <= 1e-7) return null;
+  const segmentCount = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2)));
+  const delta = sweep / segmentCount;
+  const cb = CurveBuilder.create();
+  const start = {
+    x: cx + radius * Math.cos(startAngle),
+    y: cy + radius * Math.sin(startAngle)
+  };
+  cb.beginXY(start.x, start.y);
+
+  for (let i = 0; i < segmentCount; i++) {
+    const a0 = startAngle + delta * i;
+    const a1 = a0 + delta;
+    const alpha = 4 / 3 * Math.tan(delta / 4);
+    const p0 = { x: cx + radius * Math.cos(a0), y: cy + radius * Math.sin(a0) };
+    const p3 = { x: cx + radius * Math.cos(a1), y: cy + radius * Math.sin(a1) };
+    const t0 = { x: -Math.sin(a0), y: Math.cos(a0) };
+    const t1 = { x: -Math.sin(a1), y: Math.cos(a1) };
+    const c1 = { x: p0.x + alpha * radius * t0.x, y: p0.y + alpha * radius * t0.y };
+    const c2 = { x: p3.x - alpha * radius * t1.x, y: p3.y - alpha * radius * t1.y };
+    cb.addBezierXY(c1.x, c1.y, c2.x, c2.y, p3.x, p3.y);
+  }
+
+  const poly = PolyCurve.create();
+  poly.addCurve(cb.createCurve());
+  return poly;
 }
 
 function buildAnchorTopology(records, mergeTolerance) {
