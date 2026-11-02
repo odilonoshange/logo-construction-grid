@@ -1035,8 +1035,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     width: isFinite(maxX - minX) ? maxX - minX : 100,
     height: isFinite(maxY - minY) ? maxY - minY : 100
   };
-  const geometryScale = createGeometryScaleContext(bounds);
-  const featureLengthFloor = geometryScale.featureLength;
+  const objectScaleContext = createGeometryScaleContext(bounds);
+  const featureLengthFloor = objectScaleContext.featureLength;
   const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
 
   // Identificação topológica de pétalas e cortes (caso existam formas poligonais)
