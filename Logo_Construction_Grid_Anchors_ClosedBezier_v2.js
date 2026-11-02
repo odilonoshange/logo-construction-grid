@@ -1506,29 +1506,6 @@ function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves
   }
 }
 
-function addBoundingBoxGuides(bounds, output, includeDiagonals) {
-  if (!bounds) return;
-  const x1 = bounds.x, x2 = bounds.x + bounds.width;
-  const y1 = bounds.y, y2 = bounds.y + bounds.height;
-  const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
-
-  // Frame edges are clipped to the real logo bounds at output time.
-  output.push({ p1: { x: cx, y: y1 }, angle: 0, importance: 98, source: "bounding-box-edge" });
-  output.push({ p1: { x: cx, y: y2 }, angle: 0, importance: 98, source: "bounding-box-edge" });
-  output.push({ p1: { x: x1, y: cy }, angle: Math.PI / 2, importance: 98, source: "bounding-box-edge" });
-  output.push({ p1: { x: x2, y: cy }, angle: Math.PI / 2, importance: 98, source: "bounding-box-edge" });
-
-  // Centre axes follow the selected reach boundary (logo margin or spread).
-  output.push({ p1: { x: cx, y: cy }, angle: 0, importance: 91, source: "centerline" });
-  output.push({ p1: { x: cx, y: cy }, angle: Math.PI / 2, importance: 91, source: "centerline" });
-
-  const ratio = Math.abs(bounds.width - bounds.height) / Math.max(bounds.width, bounds.height, 1);
-  if (includeDiagonals && ratio <= 0.12) {
-    output.push({ p1: { x: cx, y: cy }, angle: Math.atan2(bounds.height, bounds.width), importance: 52, source: "bounding-box-diagonal" });
-    output.push({ p1: { x: cx, y: cy }, angle: -Math.atan2(bounds.height, bounds.width), importance: 52, source: "bounding-box-diagonal" });
-  }
-}
-
 // Seleção visual dos handles: conserva as coordenadas Bézier reais, reduz
 // marcadores quando existe espaço e omite os que inevitavelmente colidiriam.
 // Isto afeta apenas a apresentação, nunca a geometria da curva original.
@@ -2841,10 +2818,6 @@ function main() {
         if (tangentMode >= 1) {
           addBezierTangentCandidates(polyCurve, geom.handles, candidates, tangentMode === 2);
         }
-
-        // The frame is finite; centre axes follow the selected reach boundary.
-        // Diagonals are only proposed when the exact bounds are nearly square.
-        addBoundingBoxGuides(exactBounds, candidates, true);
 
         // Curvature centres create useful cross-axes, while the actual circles
         // remain in their independent layer.
