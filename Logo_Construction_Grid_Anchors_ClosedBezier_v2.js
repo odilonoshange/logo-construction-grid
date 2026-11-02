@@ -695,31 +695,60 @@ function detectDominantDirection(segments) {
 }
 
 function detectAxisSymmetry(anchors, angle) {
-  if (anchors.length < 3) return { score: 0, axis: angle, perpendicular: angle + Math.PI / 2 };
-  const ca = Math.cos(angle), sa = Math.sin(angle);
-  const points = anchors.map(p => ({ u: p.x * ca + p.y * sa, v: -p.x * sa + p.y * ca }));
-  const uMin = Math.min.apply(null, points.map(p => p.u)), uMax = Math.max.apply(null, points.map(p => p.u));
-  const vMin = Math.min.apply(null, points.map(p => p.v)), vMax = Math.max.apply(null, points.map(p => p.v));
-  const uMid = (uMin + uMax) / 2, vMid = (vMin + vMax) / 2;
-  const scale = Math.max(Number.EPSILON * 100, Math.min(uMax - uMin, vMax - vMin));
+  const validAnchors=(anchors||[]).filter(p=>p&&Number.isFinite(p.x)&&Number.isFinite(p.y));
+  if(validAnchors.length<3)return{score:0,axis:angle,perpendicular:angle+Math.PI/2};
 
-  function mirrorScore(useU) {
-    let matched = 0;
-    for (const p of points) {
-      const target = useU ? { u: 2 * uMid - p.u, v: p.v } : { u: p.u, v: 2 * vMid - p.v };
-      let best = Infinity;
-      for (const q of points) best = Math.min(best, Math.hypot(target.u - q.u, target.v - q.v));
-      if (best <= scale * 0.03) matched++;
-    }
-    return matched / points.length;
+  const ca=Math.cos(angle),sa=Math.sin(angle);
+  const points=validAnchors.map(p=>({u:p.x*ca+p.y*sa,v:-p.x*sa+p.y*ca}));
+  const uMin=Math.min.apply(null,points.map(p=>p.u)),uMax=Math.max.apply(null,points.map(p=>p.u));
+  const vMin=Math.min.apply(null,points.map(p=>p.v)),vMax=Math.max.apply(null,points.map(p=>p.v));
+  const uMid=(uMin+uMax)/2,vMid=(vMin+vMax)/2;
+  const spanU=uMax-uMin,spanV=vMax-vMin;
+  const diagonal=Math.max(Number.EPSILON*100,Math.hypot(spanU,spanV));
+  const minorDimension=Math.max(diagonal*0.04,Math.min(spanU,spanV));
+  const matchTolerance=Math.max(diagonal*0.0005,minorDimension*0.03);
+  const cellSize=Math.max(matchTolerance,Number.EPSILON*100);
+  const buckets=new Map();
+  const key=(x,y)=>x+","+y;
+
+  for(const p of points){
+    const gx=Math.floor(p.u/cellSize),gy=Math.floor(p.v/cellSize);
+    const k=key(gx,gy);
+    if(!buckets.has(k))buckets.set(k,[]);
+    buckets.get(k).push(p);
   }
-  const longitudinal = mirrorScore(false), transverse = mirrorScore(true);
-  return {
-    longitudinal: longitudinal,
-    transverse: transverse,
-    score: Math.max(longitudinal, transverse),
-    axis: longitudinal >= transverse ? angle : angle + Math.PI / 2,
-    perpendicular: longitudinal >= transverse ? angle + Math.PI / 2 : angle
+
+  function hasMirroredMatch(target){
+    const gx=Math.floor(target.u/cellSize),gy=Math.floor(target.v/cellSize);
+    for(let dx=-1;dx<=1;dx++){
+      for(let dy=-1;dy<=1;dy++){
+        const bucket=buckets.get(key(gx+dx,gy+dy));
+        if(!bucket)continue;
+        for(const q of bucket){
+          if(Math.hypot(target.u-q.u,target.v-q.v)<=matchTolerance)return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function mirrorScore(useU){
+    let matched=0;
+    for(const p of points){
+      const target=useU
+        ? {u:2*uMid-p.u,v:p.v}
+        : {u:p.u,v:2*vMid-p.v};
+      if(hasMirroredMatch(target))matched++;
+    }
+    return matched/points.length;
+  }
+
+  const longitudinal=mirrorScore(false),transverse=mirrorScore(true);
+  return{
+    longitudinal,transverse,
+    score:Math.max(longitudinal,transverse),
+    axis:longitudinal>=transverse?angle:angle+Math.PI/2,
+    perpendicular:longitudinal>=transverse?angle+Math.PI/2:angle
   };
 }
 
@@ -1502,7 +1531,7 @@ function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves
     if (!h || !h.anchor || !h.handle) continue;
     const dx = h.handle.x - h.anchor.x;
     const dy = h.handle.y - h.anchor.y;
-    if (Math.hypot(dx, dy) < 0.5) continue;
+    if (Math.hypot(dx, dy) <= Number.EPSILON * 100) continue;
     output.push({
       p1: { x: h.anchor.x, y: h.anchor.y },
       angle: Math.atan2(dy, dx),
@@ -1521,14 +1550,17 @@ function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves
         { p: b.end, dx: b.end.x - b.c2.x, dy: b.end.y - b.c2.y }
       ];
       for (const v of vectors) {
-        if (Math.hypot(v.dx, v.dy) < 1e-9) continue;
+        if (Math.hypot(v.dx, v.dy) <= Number.EPSILON * 100) continue;
         output.push({ p1: v.p, angle: Math.atan2(v.dy, v.dx), importance: 58, support: 1, source: "bezier-tangent" });
       }
+      const localCurveScale = Math.max(
+        dist(b.start, b.c1), dist(b.c1, b.c2), dist(b.c2, b.end), Number.EPSILON * 100
+      );
       for (const t of cubicInflectionParametersAccurate(b)) {
         const mt = 1 - t;
         const dx = 3 * mt * mt * (b.c1.x - b.start.x) + 6 * mt * t * (b.c2.x - b.c1.x) + 3 * t * t * (b.end.x - b.c2.x);
         const dy = 3 * mt * mt * (b.c1.y - b.start.y) + 6 * mt * t * (b.c2.y - b.c1.y) + 3 * t * t * (b.end.y - b.c2.y);
-        if (Math.hypot(dx, dy) < 0.5) continue;
+        if (Math.hypot(dx, dy) <= localCurveScale * 1e-9) continue;
         output.push({ p1: cubicPoint(b, t), angle: Math.atan2(dy, dx), importance: 42, support: 1, source: "bezier-inflection" });
       }
     }
@@ -2314,9 +2346,9 @@ function createGridStrokeStyles(picker, baseWidth) {
 }
 
 function appendStyledGridLine(defs, line, ext, styles, noFill) {
-  if (!ext || dist(ext.p1, ext.p2) < 0.75) return;
+  if (!ext || dist(ext.p1, ext.p2) <= Number.EPSILON * 100) return;
   function add(a, b, style) {
-    if (dist(a, b) < 0.5) return;
+    if (dist(a, b) <= Number.EPSILON * 100) return;
     defs.push(PolyCurveNodeDefinition.create(
       makeLinePoly(a.x, a.y, b.x, b.y), noFill, style.fill, style.lineStyle, noFill
     ));
@@ -2967,7 +2999,7 @@ function main() {
             ? exactBounds
             : constructionBounds;
           const ext = extendLineToRect(line, clipBounds);
-          if (!ext || dist(ext.p1, ext.p2) < 1.0) continue;
+          if (!ext || dist(ext.p1, ext.p2) <= Number.EPSILON * 100) continue;
           appendStyledGridLine(defs, line, ext, gridStrokeStyles, noFill);
         }
 
