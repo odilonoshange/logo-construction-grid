@@ -1865,8 +1865,14 @@ function collectDirectionEvidence(polyCurve, geom) {
   let totalWeight = 0, straightWeight = 0, curveWeight = 0, primitiveId = 0;
   const bounds = geom && geom.bounds ? geom.bounds : { width: 100, height: 100 };
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const globalMinUsefulLength = diagonal * 0.002;
   const components = (geom && geom.componentModel && geom.componentModel.components) || [];
+  const componentById = new Map(components.map(component => [component.id, component]));
+
+  function componentScale(component) {
+    const bounds = component && component.bounds;
+    if (!bounds || !Number.isFinite(bounds.width) || !Number.isFinite(bounds.height)) return diagonal;
+    return Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
+  }
 
   function componentForCurve(curveIndex) {
     for (const component of components) {
@@ -1879,10 +1885,8 @@ function collectDirectionEvidence(polyCurve, geom) {
   for (const seg of (geom.straightSegments || [])) {
     if (!seg || !seg.p1 || !seg.p2) continue;
     const length = dist(seg.p1, seg.p2);
-    const component = components.find(item => item.id === seg.componentId);
-    const componentDiagonal = component && component.bounds
-      ? Math.hypot(component.bounds.width, component.bounds.height)
-      : diagonal;
+    const component = componentById.get(seg.componentId);
+    const componentDiagonal = componentScale(component);
     if (length < (component ? componentDiagonal : diagonal) * 0.002) continue;
     const angle = canonicalLineAngle(Math.atan2(seg.p2.y - seg.p1.y, seg.p2.x - seg.p1.x));
     const weight = Math.min(length, (component ? componentDiagonal : diagonal) * 0.75);
@@ -1899,10 +1903,8 @@ function collectDirectionEvidence(polyCurve, geom) {
       const curve = polyCurve.at(c);
       const beziers = collectBeziers(curve);
       const componentId = componentForCurve(c);
-      const component = components.find(item => item.id === componentId);
-      const componentDiagonal = component && component.bounds
-        ? Math.hypot(component.bounds.width, component.bounds.height)
-        : diagonal;
+      const component = componentById.get(componentId);
+      const componentDiagonal = componentScale(component);
       const minUsefulLength = (component ? componentDiagonal : diagonal) * 0.002;
       for (let bIdx = 0; bIdx < beziers.length; bIdx++) {
         const b = beziers[bIdx];
