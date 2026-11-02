@@ -2171,7 +2171,7 @@ function classifyGeometryProfile(geom) {
     typographic:clamp(0.20*clamp((aspect-1.1)/2.4,0,1)+0.25*multiContour+0.18*straightRatio+0.17*curveRatio+0.20*(1-openRatio),0,1),
     handwriting:clamp(0.38*openRatio+0.30*curveRatio+0.18*(1-symmetry)+0.14*(1-straightRatio),0,1),
     organic:clamp(0.48*curveRatio+0.24*(1-symmetry)+0.16*(1-moduleConfidence)+0.12*(1-circleSignal),0,1),
-    radial:geom.isRadialArray?1:clamp(0.35*moduleConfidence+0.25*circleSignal+0.20*symmetry+0.20*straightRatio,0,0.69)
+    radial:geom.isRadialArray?1:0
   };
   const ranked=Object.keys(scores).sort((a,b)=>scores[b]-scores[a]);
   return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour}};
@@ -2489,7 +2489,7 @@ function main() {
   attachTip(anchorSizeCtrl, "Largura dos nós quadrados das âncoras em pixels.");
   attachTip(handleSizeCtrl, "Diâmetro dos pontos circulares nas extremidades dos handles de Bézier.");
   attachTip(landmarkSizeCtrl, "Diâmetro dos marcadores de extremos e eventos de curva.");
-  attachTip(scaleMarkersSwitch, "Quando activo, os tamanhos dos marcadores, as distâncias de colisão, a tolerância de fusão e a margem da grelha acompanham a dimensão do objecto. Os valores dos controlos são referências para um objecto de 600 × 600 unidades.");
+  attachTip(scaleMarkersSwitch, "Quando activo, os tamanhos dos marcadores, as distâncias de colisão, a tolerância de fusão e a margem da grelha acompanham a dimensão do objecto. Os valores dos controlos são referências para uma geometria de 600 × 600 unidades de coordenadas.");
   attachTip(handleScalingCombo, "'Automatic' reduz pontos em zonas densas e oculta os que colidiriam; 'Fixed' mantém o diâmetro, com filtragem dos conflitos inevitáveis.");
   attachTip(stemScaleCombo, "Mantém o ponto na posição Bézier real; os valores acima de 1x prolongam apenas a haste, para além do ponto.");
   attachTip(anchorStyleCombo, "Estilo de renderização dos nós das âncoras.");
@@ -2739,13 +2739,18 @@ function main() {
     if (showGridSwitch.value) {
       const defs = [];
       const gridMode = gridModeCombo.selectedIndex;
+      const profileIds = ["geometric","typographic","handwriting","organic","radial"];
+      const selectedProfile = analysisProfileCombo.selectedIndex === 0
+        ? geom.profile.suggested
+        : profileIds[analysisProfileCombo.selectedIndex - 1] || geom.profile.suggested;
 
-      // MODO RADIAL (SÓ ATIVADO SE FOR UM ARRANJO RADIAL COMPROVADO)
-      if (gridMode === 1 && geom.isRadialArray) {
+      // Radial construction is only enabled when the selected/detected profile
+      // agrees with a positively detected radial topology.
+      if (geom.isRadialArray && (gridMode === 1 || (gridMode === 0 && selectedProfile === "radial"))) {
         const innerPetals = geom.innerBand;
         const outerPetals = geom.outerBand;
         const minR = innerPetals.reduce((m, p) => Math.min(m, p.rIn), Infinity);
-        const centerVoidLimit = Math.max(15.0, minR * 0.72);
+        const centerVoidLimit = Math.max(initialScaleContext.diagonal * 0.012, minR * 0.72);
 
         // A. Linhas Radiais Independentes (Sem fusão, sem choque)
         for (const petal of geom.petalData) {
@@ -2762,7 +2767,8 @@ function main() {
                   dToInner = Math.min(dToInner, dist(edge.pIn, ipt));
                 }
               }
-              const backSpan = (dToInner < 10.0) ? 0 : Math.min(edge.len * 0.18, Math.max(0, dToInner - 8.0));
+              const radialClearance = initialScaleContext.diagonal * 0.006;
+              const backSpan = (dToInner < radialClearance * 1.25) ? 0 : Math.min(edge.len * 0.18, Math.max(0, dToInner - radialClearance));
               pStart = {
                 x: edge.pIn.x - edge.dir.x * backSpan,
                 y: edge.pIn.y - edge.dir.y * backSpan
@@ -2785,7 +2791,9 @@ function main() {
                   }
                 }
               }
-              const forwardSpan = isFinite(dToOuter) ? Math.max(0, Math.min(22.0, dToOuter - 8.0)) : Math.min(22.0, edge.len * 0.6);
+              const radialClearance = initialScaleContext.diagonal * 0.006;
+              const maxForwardSpan = initialScaleContext.diagonal * 0.02;
+              const forwardSpan = isFinite(dToOuter) ? Math.max(0, Math.min(maxForwardSpan, dToOuter - radialClearance)) : Math.min(maxForwardSpan, edge.len * 0.6);
               pEnd = {
                 x: edge.pOut.x + edge.dir.x * forwardSpan,
                 y: edge.pOut.y + edge.dir.y * forwardSpan
@@ -2798,7 +2806,7 @@ function main() {
           // B. Guias de Corte Transversal nas Extremidades (Com expansão generosa e mesmo estilo da grelha!)
           for (const cap of petal.capEdges) {
             // Expansão visível de 12 a 24px (proporcional à pétala)
-            const desiredSpan = clamp(cap.len * 0.55, 12.0, 24.0);
+            const desiredSpan = clamp(cap.len * 0.55, initialScaleContext.diagonal * 0.012, initialScaleContext.diagonal * 0.024);
             let deltaA = desiredSpan;
             let deltaB = desiredSpan;
 
@@ -2807,10 +2815,12 @@ function main() {
               if (otherPetal !== petal) {
                 for (const opt of otherPetal.pts) {
                   const dA = dist(cap.p1, opt);
-                  if (dA < desiredSpan + 4.0) deltaA = Math.min(deltaA, Math.max(0, dA - 6.0));
+                  const radialClearance = initialScaleContext.diagonal * 0.006;
+                  if (dA < desiredSpan + radialClearance) deltaA = Math.min(deltaA, Math.max(0, dA - radialClearance));
 
                   const dB = dist(cap.p2, opt);
-                  if (dB < desiredSpan + 4.0) deltaB = Math.min(deltaB, Math.max(0, dB - 6.0));
+                  const radialClearance = initialScaleContext.diagonal * 0.006;
+                  if (dB < desiredSpan + radialClearance) deltaB = Math.min(deltaB, Math.max(0, dB - radialClearance));
                 }
               }
             }
@@ -2839,10 +2849,6 @@ function main() {
         const preciseAngle = initialPreciseAngle;
         const alignmentTolerance = Math.max(Number.EPSILON * 100, effectiveMergeDistance);
         const directionFamilies = (geom.directionFamilies || []).slice(0, 4);
-        const profileIds = ["geometric","typographic","handwriting","organic","radial"];
-        const selectedProfile = analysisProfileCombo.selectedIndex === 0
-          ? geom.profile.suggested
-          : profileIds[analysisProfileCombo.selectedIndex - 1] || geom.profile.suggested;
         const profileAlignmentPoints = selectedProfile === "typographic" ? geom.anchors : alignmentPoints;
 
         if (gridMode === 0) {
