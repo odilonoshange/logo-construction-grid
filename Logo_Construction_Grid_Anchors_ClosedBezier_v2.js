@@ -1310,7 +1310,6 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       ? Math.max(minDotR, Math.min(baseDotR, localClearance * 0.22))
       : baseDotR;
 
-    if (componentMetric) componentMetric.handleCount++;
     adaptiveHandles.push({
       anchor: h.anchor,
       handle: h.handle,
@@ -1325,6 +1324,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
 
   for (const component of componentMetrics) {
     component.anchorCount = adaptiveAnchors.filter(a => a.componentIds && a.componentIds.indexOf(component.id) !== -1).length;
+    component.handleCount = adaptiveHandles.filter(h => h.componentId === component.id).length;
   }
 
   return {
@@ -2338,7 +2338,6 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.circleFamilies = circleAnalysis.families;
   geom.displayCircles = circleAnalysis.circles;
   geom.circleRelationCount = circleAnalysis.relationCount;
-  geom.profile = classifyGeometryProfile(geom);
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
   }
@@ -2357,6 +2356,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
       localStraightEdgeCount: localEdges.length
     });
   });
+  geom.profile = classifyGeometryProfile(geom);
   geom.proportionRelations = [];
   for (const axis of moduleSystems.axes) {
     for (const ratio of (axis.ratios || [])) {
