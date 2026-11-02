@@ -1397,54 +1397,49 @@ function getExactCurveBounds(polyCurve) {
 }
 
 function addAlignmentLineCandidates(points, origin, angle, tolerance, output, baseImportance, source) {
-  if (!points || !points.length) return;
-  const nx = -Math.sin(angle);
-  const ny = Math.cos(angle);
-  const records = [];
-
+  if (!points || points.length < 2) return;
+  const nx = -Math.sin(angle), ny = Math.cos(angle);
+  const ux = Math.cos(angle), uy = Math.sin(angle);
+  const records = [], seenCoordinates = new Set();
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const p of points) {
     if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
-    const value = (p.x - origin.x) * nx + (p.y - origin.y) * ny;
-    records.push({ value, importance: p.importance || p.priority || 0 });
+    const key = Math.round(p.x * 2) + "," + Math.round(p.y * 2);
+    if (seenCoordinates.has(key)) continue;
+    seenCoordinates.add(key);
+    minX = Math.min(minX,p.x); minY = Math.min(minY,p.y);
+    maxX = Math.max(maxX,p.x); maxY = Math.max(maxY,p.y);
+    records.push({value:(p.x-origin.x)*nx+(p.y-origin.y)*ny,along:(p.x-origin.x)*ux+(p.y-origin.y)*uy,x:p.x,y:p.y,importance:p.importance||p.priority||0});
   }
-  records.sort((a, b) => a.value - b.value);
-
-  const clusters = [];
-  for (const record of records) {
-    const current = clusters[clusters.length - 1];
-    if (!current || Math.abs(record.value - current.mean) > tolerance) {
-      clusters.push({ sum: record.value, count: 1, mean: record.value, maxImportance: record.importance });
-    } else {
-      current.sum += record.value;
-      current.count++;
-      current.mean = current.sum / current.count;
-      current.maxImportance = Math.max(current.maxImportance, record.importance);
+  if(records.length<2)return;
+  records.sort((x,y)=>x.value-y.value);
+  const diagonal=Math.max(1,Math.hypot(maxX-minX,maxY-minY));
+  const minAlongSpan=Math.max(tolerance*2.5,diagonal*0.025);
+  const clusters=[];
+  for(const record of records){
+    const current=clusters[clusters.length-1];
+    if(!current||Math.abs(record.value-current.mean)>tolerance){
+      clusters.push({sum:record.value,count:1,mean:record.value,maxImportance:record.importance,records:[record]});
+    }else{
+      current.sum+=record.value;current.count++;current.mean=current.sum/current.count;
+      current.maxImportance=Math.max(current.maxImportance,record.importance);current.records.push(record);
     }
   }
-
-  const rankedClusters = clusters.map(cluster => ({
-    cluster,
-    score: baseImportance + Math.min(18, cluster.maxImportance * 0.12) + Math.min(14, cluster.count * 1.4)
-  }));
-  rankedClusters.sort((a, b) => b.score - a.score);
-
-  // A logo with many nodes should not create an unbounded number of candidate lines.
-  for (const entry of rankedClusters.slice(0, 80)) {
-    const cluster = entry.cluster;
-    const p1 = {
-      x: origin.x + nx * cluster.mean,
-      y: origin.y + ny * cluster.mean
-    };
-    output.push({
-      p1,
-      angle,
-      importance: entry.score,
-      support: cluster.count,
-      source: source || "alignment"
-    });
+  const rankedClusters=[];
+  for(const cluster of clusters){
+    if(cluster.records.length<2)continue;
+    let minAlong=Infinity,maxAlong=-Infinity;
+    for(const record of cluster.records){minAlong=Math.min(minAlong,record.along);maxAlong=Math.max(maxAlong,record.along);}
+    if(maxAlong-minAlong<minAlongSpan)continue;
+    const support=cluster.records.length;
+    rankedClusters.push({cluster,support,score:baseImportance+Math.min(18,cluster.maxImportance*0.12)+Math.min(14,support*1.4)});
+  }
+  rankedClusters.sort((x,y)=>y.score-x.score);
+  for(const entry of rankedClusters.slice(0,10)){
+    const cluster=entry.cluster;
+    output.push({p1:{x:origin.x+nx*cluster.mean,y:origin.y+ny*cluster.mean},angle,importance:entry.score,support:entry.support,source:source||"alignment"});
   }
 }
-
 function addCurveExtremumTangents(polyCurve, output) {
   if (!polyCurve || !polyCurve.curveCount) return;
   for (let c = 0; c < polyCurve.curveCount; c++) {
@@ -1762,10 +1757,21 @@ function detectDirectionFamilies(evidence, fallbackAngle) {
     const share = weight / totalWeight;
     const supportCount = primitives.size;
 
-    // A single long edge may be meaningful; a weaker family needs support from
-    // several independent Bézier/edge primitives.
+    // A single long straight edge may define a real direction. A curved
+    // primitive, however, must never create a direction family by itself:
+    // its sampled tangents describe local curvature, not a global grid axis.
+    const edgePrimitives = new Set(), curvePrimitives = new Set();
+    for (const index of memberIndices) {
+      const sample = samples[index];
+      if (sample.source === 'edge') edgePrimitives.add(sample.primitive);
+      else curvePrimitives.add(sample.primitive);
+    }
+    const edgePrimitiveCount = edgePrimitives.size;
+    const curvePrimitiveCount = curvePrimitives.size;
+    if (edgePrimitiveCount === 0 && curvePrimitiveCount < 2) continue;
     if (share < 0.085 && !(share >= 0.055 && supportCount >= 3)) continue;
-    if (supportCount < 2 && share < 0.22) continue;
+    if (edgePrimitiveCount > 0 && supportCount < 2 && share < 0.22) continue;
+    if (edgePrimitiveCount === 0 && (curvePrimitiveCount < 2 || share < 0.11)) continue;
 
     for (const index of memberIndices) assigned.add(index);
     families.push({
@@ -1807,7 +1813,7 @@ function evaluateProjectedModule(points, bounds, angle, directionWeight) {
   const diagonal = Math.max(1, Math.hypot(bounds.width, bounds.height));
   const tolerance = Math.max(0.65, Math.min(2.2, diagonal * 0.0022));
   const positions = mergeProjectedPositions(points, angle, tolerance);
-  if (positions.length < 4) return null;
+  if (positions.length < 5) return null;
 
   const gaps = [];
   for (let i = 1; i < positions.length; i++) {
@@ -1859,7 +1865,7 @@ function evaluateProjectedModule(points, bounds, angle, directionWeight) {
       }
     }
     const gapCoverage = matchedGaps / gaps.length;
-    if (gapCoverage < 0.58) continue;
+    if (gapCoverage < 0.70) continue;
 
     // Search for the most coherent lattice phase using a bounded circular
     // histogram. This is linear in the number of projected points.
@@ -1906,13 +1912,13 @@ function evaluateProjectedModule(points, bounds, angle, directionWeight) {
     const phaseCoverage = phaseHits / Math.max(1, positions.reduce((sum, p) => sum + p.count, 0));
 
     // A small divisor can make nearly any interval look modular. Demand at
-    // least two direct base intervals, or four independent supported gaps.
-    if (directHits < 2) continue;
-    if (phaseCoverage < 0.70) continue;
+    // least three direct base intervals before accepting a modular unit.
+    if (directHits < 3) continue;
+    if (phaseCoverage < 0.78) continue;
 
-    const directConfidence = Math.min(1, directHits / 3);
+    const directConfidence = Math.min(1, directHits / 4);
     const confidence = clamp(phaseCoverage * 0.52 + gapCoverage * 0.32 + directConfidence * 0.16, 0, 1);
-    if (confidence < 0.70) continue;
+    if (confidence < 0.78) continue;
 
     const ratios = [1, 2, 3, 4].filter(n => gaps.some(g =>
       Math.abs(g - unit * n) <= Math.max(tolerance * 2.0, unit * 0.04)
@@ -2177,13 +2183,16 @@ function createModuleGridCandidates(axis, bounds, origin, output, mergeTolerance
   const firstK = Math.ceil((minP - axis.phase - mergeTolerance * 0.15) / axis.module);
   const lastK = Math.floor((maxP - axis.phase + mergeTolerance * 0.15) / axis.module);
   if (lastK < firstK) return;
-  const total = lastK - firstK + 1;
-  const stride = total > 21 ? Math.ceil(total / 21) : 1;
+  // A measured module is a reference unit, not permission to cover the whole
+  // canvas with a dense lattice. Keep a compact five-line window around centre.
+  const centreK = Math.round((originP - axis.phase) / axis.module);
+  const selectedK = [centreK,centreK-1,centreK+1,centreK-2,centreK+2]
+    .filter((k,index,array)=>k>=firstK&&k<=lastK&&array.indexOf(k)===index);
   let ordinal = 0;
-  for (let k = firstK; k <= lastK; k += stride) {
+  for (const k of selectedK) {
     const projection = axis.phase + k * axis.module;
     const offset = projection - originP;
-    const major = (ordinal % 3 === 0);
+    const major = (ordinal % 2 === 0);
     output.push({
       p1: origin,
       angle: axis.angle,
@@ -2853,8 +2862,11 @@ function main() {
             addAlignmentLineCandidates(alignmentPoints, gridOrigin, preciseAngle + Math.PI / 2, alignmentTolerance, candidates, 29, "perpendicular-alignment");
           }
 
-          // Preserve long structural edges as independent, high-value guides.
+          // Preserve substantial straight edges. Very short edges often belong
+          // to local contour details and should not become full-frame diagonals.
+          const minGuideEdge = Math.max(6, Math.hypot(exactBounds.width, exactBounds.height) * 0.045);
           for (const seg of geom.straightSegments) {
+            if (dist(seg.p1, seg.p2) < minGuideEdge) continue;
             candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, importance: 82, support: 1, source: "structural-edge" });
           }
         } else if (gridMode === 2) {
@@ -2882,10 +2894,9 @@ function main() {
           }
         }
 
-        // Curve extrema always receive a tangent guide. These points are computed
-        // analytically from the Bézier derivative and do not alter anchor topology.
-        addCurveExtremumTangents(polyCurve, candidates);
-
+        // Local Bézier tangents are opt-in. They are not global construction axes
+        // by default: otherwise every curve extremum can project an arbitrary
+        // full-frame line and overwhelm the structural grid.
         const tangentMode = tangentSourceCombo.selectedIndex;
         if (tangentMode >= 1) {
           addBezierTangentCandidates(polyCurve, geom.handles, candidates, tangentMode === 2);
@@ -2913,7 +2924,7 @@ function main() {
         if (showModulesSwitch.value && geom.modules && Array.isArray(geom.modules.axes)) {
           // Only high-confidence systems are promoted to construction modules.
           // Their phase comes from the measured anchor/landmark positions.
-          for (const axis of geom.modules.axes.slice(0, 4)) {
+          for (const axis of geom.modules.axes.slice(0, 2)) {
             createModuleGridCandidates(axis, exactBounds, exactCenter, candidates, alignmentTolerance);
           }
         }
@@ -2930,7 +2941,8 @@ function main() {
         // Merge tolerance also provides a restrained detail control: larger
         // values remove near-duplicate candidates and lower the guide budget.
         const detailFactor = clamp(1.18 - mergeDistCtrl.value * 0.0062, 0.56, 1.12);
-        const guideBudget = Math.max(24, Math.round((gridMode === 2 ? 68 : 62) * detailFactor));
+        const baseGuideBudget = gridMode === 2 ? 28 : (gridMode === 3 ? 22 : 20);
+        const guideBudget = Math.max(10, Math.round(baseGuideBudget * detailFactor));
         for (const line of cleanLines.slice(0, guideBudget)) {
           const clipBounds = (line.source === "bounding-box-edge" || line.source === "bounding-box-diagonal")
             ? exactBounds
