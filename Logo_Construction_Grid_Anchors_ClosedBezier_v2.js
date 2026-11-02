@@ -1230,6 +1230,19 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
   };
 }
 
+function createGeometryScaleContext(bounds) {
+  const width = Math.abs(Number(bounds && bounds.width) || 0);
+  const height = Math.abs(Number(bounds && bounds.height) || 0);
+  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(width, height));
+  const minorFloor = diagonal * 0.04;
+  // Geometric mean avoids letting a long wordmark's width dominate marker size.
+  const reference = Math.sqrt(Math.max(width, minorFloor) * Math.max(height, minorFloor));
+  return {
+    width, height, diagonal, reference,
+    scaleFactor: Math.max(1e-6, reference / 600)
+  };
+}
+
 function lineSignedNormalOffset(line, angle) {
   const nx = -Math.sin(angle);
   const ny = Math.cos(angle);
@@ -2311,6 +2324,7 @@ function main() {
 
   const initialGeom = enrichGeometryAnalysis(polyCurve, analyzeSmartGeometry(polyCurve, 9, 9));
   const initialExactBounds = getExactCurveBounds(polyCurve) || initialGeom.bounds;
+  const initialScaleContext = createGeometryScaleContext(initialExactBounds);
   const initialPreciseAngle = initialGeom.directionFamilies && initialGeom.directionFamilies.length
     ? initialGeom.directionFamilies[0].angle
     : detectDominantDirectionPrecise(initialGeom.straightSegments, initialGeom.dominantAngle);
@@ -2399,6 +2413,7 @@ function main() {
   const anchorSizeCtrl = dimGrp.addUnitValueEditor("Anchor Base Size", UnitType.Pixel, doc.units, 9, 2, 40);
   const handleSizeCtrl = dimGrp.addUnitValueEditor("Handle Dot Size", UnitType.Pixel, doc.units, 9, 1, 30);
   const landmarkSizeCtrl = dimGrp.addUnitValueEditor("Landmark Size", UnitType.Pixel, doc.units, 5, 2, 30);
+  const scaleMarkersSwitch = dimGrp.addSwitch("Scale Markers to Object", true);
 
   // Por defeito, usa dimensionamento automático para evitar aglomeração de pontos.
   const handleScalingCombo = dimGrp.addComboBox("Handle Scaling", ["Automatic (Smart Damping)", "Fixed (Strict Dot Size)"], 0);
@@ -2411,7 +2426,8 @@ function main() {
 
   attachTip(anchorSizeCtrl, "Largura dos nós quadrados das âncoras em pixels.");
   attachTip(handleSizeCtrl, "Diâmetro dos pontos circulares nas extremidades dos handles de Bézier.");
-  attachTip(landmarkSizeCtrl, "Diâmetro dos marcadores de ápices e marcos geométricos.");
+  attachTip(landmarkSizeCtrl, "Diâmetro dos marcadores de extremos e eventos de curva.");
+  attachTip(scaleMarkersSwitch, "Quando activo, os tamanhos dos marcadores, as distâncias de colisão, a tolerância de fusão e a margem da grelha acompanham a dimensão do objecto. Os valores dos controlos são referências para um objecto de 600 × 600 unidades.");
   attachTip(handleScalingCombo, "'Automatic' reduz pontos em zonas densas e oculta os que colidiriam; 'Fixed' mantém o diâmetro, com filtragem dos conflitos inevitáveis.");
   attachTip(stemScaleCombo, "Mantém o ponto na posição Bézier real; os valores acima de 1x prolongam apenas a haste, para além do ponto.");
   attachTip(anchorStyleCombo, "Estilo de renderização dos nós das âncoras.");
@@ -2456,13 +2472,13 @@ function main() {
     return geometryCache[key];
   }
 
-  function getDisplayAnchors(geom, mode, gap) {
+  function getDisplayAnchors(geom, mode, gap, effectiveAnchorSize) {
     const source = geom.anchors.slice().sort((a, b) => b.priority - a.priority);
     // O modo "All Anchors" continua a mostrar todos os nós sem filtragem visual.
     if (mode === 1) return source;
 
     const result = [];
-    const threshold = mode === 2 ? Math.max(4, gap * 1.35) : Math.max(3, gap);
+    const threshold = Math.max(Number.EPSILON, mode === 2 ? gap * 1.35 : gap);
     const cellSize = threshold;
     const buckets = new Map();
     function key(x, y) { return x + "," + y; }
@@ -2501,12 +2517,12 @@ function main() {
       }
     }
 
-    const baseHalf = anchorSizeCtrl.value / 2;
-    const nearestDistances = calculateNearestDistances(result, Math.max(1, anchorSizeCtrl.value * 2.4));
+    const baseHalf = effectiveAnchorSize / 2;
+    const nearestDistances = calculateNearestDistances(result, Math.max(Number.EPSILON, effectiveAnchorSize * 2.4));
     return result.map((a, i) => {
       const nearest = nearestDistances[i];
-      const halfSize = nearest < anchorSizeCtrl.value * 2.4
-        ? Math.max(1.0, Math.min(baseHalf, nearest * 0.32))
+      const halfSize = nearest < effectiveAnchorSize * 2.4
+        ? Math.max(baseHalf * 0.12, Math.min(baseHalf, nearest * 0.32))
         : baseHalf;
       return Object.assign({}, a, { halfSize: halfSize, clearance: nearest });
     });
@@ -2516,28 +2532,35 @@ function main() {
   // MOTOR GEOMÉTRICO RESTAURADO COM CORTES TRANSVERSAIS INTEGRADOS NA GRELHA
   // =========================================================================
   function buildGridStructure() {
-    const geom = getCachedGeometry(anchorSizeCtrl.value, handleSizeCtrl.value);
+    const scaleFactor = scaleMarkersSwitch.value ? initialScaleContext.scaleFactor : 1;
+    const effectiveAnchorSize = anchorSizeCtrl.value * scaleFactor;
+    const effectiveHandleSize = handleSizeCtrl.value * scaleFactor;
+    const effectiveLandmarkSize = landmarkSizeCtrl.value * scaleFactor;
+    const effectiveMinGap = minNodeGapCtrl.value * scaleFactor;
+    const effectiveMergeDistance = mergeDistCtrl.value * scaleFactor;
+    const effectiveGridReach = gridReachCtrl.value * scaleFactor;
+    const geom = getCachedGeometry(effectiveAnchorSize, effectiveHandleSize);
     const landmarkCoincidenceTolerance = Math.max(
-      1e-5,
+      Number.EPSILON * 100,
       Math.hypot(geom.bounds.width, geom.bounds.height) * 1e-7
     );
-    const minGap = minNodeGapCtrl.value;
+    const minGap = effectiveMinGap;
     const smartCollision = adaptiveScaleSwitch.value;
     const isHandleFixed = handleScalingCombo.selectedIndex === 1;
 
-    let displayAnchors = getDisplayAnchors(geom, nodeDisplayCombo.selectedIndex, minGap);
+    let displayAnchors = getDisplayAnchors(geom, nodeDisplayCombo.selectedIndex, minGap, effectiveAnchorSize);
     let displayHandles = geom.handles;
 
     const stemMultipliers = [1.0, 1.5, 2.0, 3.0];
     const stemMultiplier = stemMultipliers[stemScaleCombo.selectedIndex] || 1.0;
 
     if (!smartCollision) {
-      const baseHalf = anchorSizeCtrl.value / 2;
+      const baseHalf = effectiveAnchorSize / 2;
       displayAnchors = displayAnchors.map(a => Object.assign({}, a, { halfSize: baseHalf }));
     }
 
     if (isHandleFixed) {
-      const baseDot = handleSizeCtrl.value / 2;
+      const baseDot = effectiveHandleSize / 2;
       displayHandles = displayHandles.map(h => Object.assign({}, h, { dotRadius: baseDot }));
     }
 
@@ -2551,18 +2574,18 @@ function main() {
       for (const l of geom.landmarks) {
         if (l.type !== "extrema" && l.type !== "cusp" && l.type !== "stationary") continue;
         if (geom.anchors.some(a => dist(a, l) <= landmarkCoincidenceTolerance)) continue;
-        handleObstacles.push({ x: l.x, y: l.y, halfSize: Math.max(1.0, landmarkSizeCtrl.value / 2) });
+        handleObstacles.push({ x: l.x, y: l.y, halfSize: effectiveLandmarkSize / 2 });
       }
     }
     if (showInflectionSwitch.value) {
       for (const l of geom.landmarks) {
         if (l.type === "inflection") {
-          handleObstacles.push({ x: l.x, y: l.y, halfSize: Math.max(1.0, handleSizeCtrl.value * 0.35) });
+          handleObstacles.push({ x: l.x, y: l.y, halfSize: effectiveHandleSize * 0.35 });
         }
       }
     }
     const visualHandles = smartCollision
-      ? buildCollisionSafeHandles(displayHandles, handleObstacles, handleSizeCtrl.value, !isHandleFixed)
+      ? buildCollisionSafeHandles(displayHandles, handleObstacles, effectiveHandleSize, !isHandleFixed)
       : displayHandles;
 
     const exactBounds = initialExactBounds || geom.bounds;
@@ -2573,7 +2596,7 @@ function main() {
     const preserveRadialBounds = gridModeCombo.selectedIndex === 1 && geom.isRadialArray;
     const framingBounds = preserveRadialBounds ? geom.bounds : exactBounds;
     const constructionBounds = reachModeCombo.selectedIndex === 0
-      ? { x: framingBounds.x - gridReachCtrl.value, y: framingBounds.y - gridReachCtrl.value, width: framingBounds.width + gridReachCtrl.value * 2, height: framingBounds.height + gridReachCtrl.value * 2 }
+      ? { x: framingBounds.x - effectiveGridReach, y: framingBounds.y - effectiveGridReach, width: framingBounds.width + effectiveGridReach * 2, height: framingBounds.height + effectiveGridReach * 2 }
       : spreadExtents;
     // Radial-array construction keeps its established bounds and centre logic.
     const center = geom.center;
@@ -2752,7 +2775,7 @@ function main() {
         }
 
         const preciseAngle = initialPreciseAngle;
-        const alignmentTolerance = Math.max(1.0, mergeDistCtrl.value);
+        const alignmentTolerance = Math.max(Number.EPSILON * 100, effectiveMergeDistance);
         const directionFamilies = (geom.directionFamilies || []).slice(0, 4);
 
         if (gridMode === 0) {
@@ -2845,7 +2868,7 @@ function main() {
         const cleanLines = buildCollisionSafeLines(
           candidates,
           { anchors: geom.anchors, handles: geom.handles, points: geom.landmarks },
-          mergeDistCtrl.value,
+          effectiveMergeDistance,
           exactBounds
         );
 
@@ -2875,7 +2898,7 @@ function main() {
     // exclusively in Anchor Nodes, avoiding a second marker over the same node.
     if (showLandmarksSwitch.value) {
       const defs = [];
-      const baseLandmarkR = Math.max(1.0, landmarkSizeCtrl.value / 2);
+      const baseLandmarkR = effectiveLandmarkSize / 2;
       for (const l of geom.landmarks) {
         if (l.type !== "extrema" && l.type !== "cusp" && l.type !== "stationary") continue;
         if (geom.anchors.some(a => dist(a, l) <= landmarkCoincidenceTolerance)) continue;
@@ -2887,7 +2910,7 @@ function main() {
 
     // 5. Inflection Points
     if (showInflectionSwitch.value) {
-      const baseInflectR = Math.max(1.0, handleSizeCtrl.value * 0.35);
+      const baseInflectR = effectiveHandleSize * 0.35;
       const defs = geom.landmarks.filter(l => l.type === "inflection").map(l => PolyCurveNodeDefinition.create(makeSmoothCirclePoly(l.x, l.y, baseInflectR), landmarkFillDesc, landmarkStrokeDesc, lsdNode, noFill));
       if (defs.length) subContainers.push({ name: "5. Inflection Points", defs: defs });
     }
@@ -2901,13 +2924,13 @@ function main() {
         if (d <= EPS) continue;
 
         const ux = rawDx / d, uy = rawDy / d;
-        const dotRadius = Math.max(0.5, h.dotRadius);
+        const dotRadius = Math.max(Number.EPSILON * 100, h.dotRadius);
         const projectedLength = Math.max(d, d * stemMultiplier);
         const projectedEndX = h.anchor.x + ux * projectedLength;
         const projectedEndY = h.anchor.y + uy * projectedLength;
 
         // Segmento principal: termina antes do círculo na posição real do handle.
-        if (d > dotRadius + 1) {
+        if (d > dotRadius * 1.08) {
           defsStems.push(PolyCurveNodeDefinition.create(
             makeLinePoly(
               h.anchor.x, h.anchor.y,
@@ -2920,7 +2943,7 @@ function main() {
 
         // Projeções >1x prolongam somente a haste após o ponto; nunca deslocam
         // o marcador da coordenada de controlo Bézier verdadeira.
-        if (projectedLength > d + dotRadius + 1 && d > dotRadius + 1) {
+        if (projectedLength > d + dotRadius * 1.08 && d > dotRadius * 1.08) {
           defsStems.push(PolyCurveNodeDefinition.create(
             makeLinePoly(
               h.handle.x + ux * dotRadius,
@@ -2974,7 +2997,7 @@ function main() {
 
   [
     showOverlaySwitch, showOutlineSwitch, showCirclesSwitch, showGridSwitch, showHandlesSwitch,
-    showAnchorsSwitch, adaptiveScaleSwitch, showSymmetrySwitch,
+    showAnchorsSwitch, adaptiveScaleSwitch, scaleMarkersSwitch, showSymmetrySwitch,
     showModulesSwitch, showLandmarksSwitch, showInflectionSwitch
   ].forEach(c => {
     try { c.setOnValueChangedHandler(() => render(true)); } catch (e) {}
