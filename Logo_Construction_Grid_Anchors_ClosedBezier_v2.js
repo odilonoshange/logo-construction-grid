@@ -2348,18 +2348,35 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
   }
+  const componentFeatures = new Map();
+  function addComponentFeature(componentId, key, value) {
+    if (!Number.isInteger(componentId) || componentId < 0) return;
+    if (!componentFeatures.has(componentId)) componentFeatures.set(componentId, {
+      anchors: [], landmarks: [], edges: [], samples: [], circles: []
+    });
+    componentFeatures.get(componentId)[key].push(value);
+  }
+  for (const anchor of (geom.anchors || [])) {
+    for (const id of (anchor.componentIds || [])) addComponentFeature(id, "anchors", anchor);
+  }
+  for (const value of (geom.landmarks || [])) addComponentFeature(value.componentId, "landmarks", value);
+  for (const value of (geom.straightSegments || [])) addComponentFeature(value.componentId, "edges", value);
+  for (const value of (evidence.samples || [])) addComponentFeature(value.componentId, "samples", value);
+  for (const value of (geom.rawCircleCandidates || [])) addComponentFeature(value.componentId, "circles", value);
+
   geom.componentAnalysis = (geom.componentMetrics || []).map(component => {
-    const localAnchors = (geom.anchors || []).filter(a =>
-      a.componentIds && a.componentIds.indexOf(component.id) !== -1
-    );
-    const localLandmarks = (geom.landmarks || []).filter(l => l.componentId === component.id);
-    const localEdges = (geom.straightSegments || []).filter(edge => edge.componentId === component.id);
+    const localData = componentFeatures.get(component.id) || {
+      anchors: [], landmarks: [], edges: [], samples: [], circles: []
+    };
+    const localAnchors = localData.anchors;
+    const localLandmarks = localData.landmarks;
+    const localEdges = localData.edges;
     const localAngle = localEdges.length ? detectDominantDirection(localEdges) : geom.dominantAngle;
     const localBounds = component.bounds &&
       Number.isFinite(component.bounds.x) && Number.isFinite(component.bounds.y) &&
       component.bounds.width > 0 && component.bounds.height > 0
       ? component.bounds : geom.bounds;
-    const localSamples = evidence.samples.filter(sample => sample.componentId === component.id);
+    const localSamples = localData.samples;
     const localEvidence = {
       samples: localSamples,
       totalWeight: localSamples.reduce((sum, sample) => sum + sample.weight, 0),
@@ -2377,7 +2394,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
       dominantAngle: localAngle
     };
     const localModules = detectModularSystems(localGeometry, localFamilies);
-    const localCircleInputs = (geom.rawCircleCandidates || []).filter(circle => circle.componentId === component.id);
+    const localCircleInputs = localData.circles;
     const localCircleAnalysis = refineCircleCandidates(localCircleInputs, localBounds);
     const localSymmetry = localAnchors.length >= 3
       ? detectAxisSymmetry(localAnchors, localAngle)
