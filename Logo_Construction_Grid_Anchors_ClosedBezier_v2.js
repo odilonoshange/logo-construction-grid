@@ -2776,7 +2776,10 @@ function main() {
 
   // Se for arranjo radial real, ativa modo 1; se for qualquer outro logo (incluindo cruzes e monogramas), ativa modo 0 (Smart Adaptive)
   const initialGridMode = isRadial ? 1 : 0;
-  const initialHasCircles = (initialGeom.displayCircles || initialGeom.circles).length > 0;
+  const initialVisibleCircles = (initialGeom.displayCircles && initialGeom.displayCircles.length > 0)
+    ? initialGeom.displayCircles
+    : (initialGeom.circles || []);
+  const initialHasCircles = (initialGeom.displayArcs || []).length > 0 || initialVisibleCircles.length > 0;
   const initialHasHandles = initialGeom.hasRealCurves && initialGeom.handles.length > 0;
   const initialHasSymmetry = initialGeom.symmetry.score >= 0.70;
   const initialHasModules = initialGeom.modules.confidence >= 0.70 && initialGeom.modules.axes.length > 0;
@@ -3113,7 +3116,9 @@ function main() {
     }
 
     // 2. Curvature Arcs & Rings
-    const visibleCircles = geom.displayCircles || geom.circles || [];
+    const visibleCircles = (geom.displayCircles && geom.displayCircles.length > 0)
+      ? geom.displayCircles
+      : (geom.circles || []);
     const visibleArcs = geom.displayArcs || [];
     if (showCirclesSwitch.value && (visibleArcs.length > 0 || visibleCircles.length > 0)) {
       const defsArcs = [];
