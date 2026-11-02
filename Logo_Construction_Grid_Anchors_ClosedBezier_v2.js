@@ -1335,6 +1335,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
     innerBand: innerBand,
     outerBand: outerBand,
     circles: uniqueCircles,
+    rawCircleCandidates: rawCircles,
     dominantAngle: dominantAngle,
     bounds: bounds,
     center: center,
@@ -1382,49 +1383,48 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
     ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
   const positionTolerance = Math.max(span * 1e-6, Number(mergeDist) || 0);
-  // Angular tolerance tightens for large marks, so slightly different diagonals
-  // are not collapsed just because they are close near the origin.
   const angleTolerance = Math.max(0.06 * DEG, Math.min(0.45 * DEG, Math.atan2(positionTolerance * 0.35, span)));
-  const sorted = rawLines.slice().sort((a, b) => {
-    const scoreA = (a.importance || 0) + Math.min(20, (a.support || 0) * 2);
-    const scoreB = (b.importance || 0) + Math.min(20, (b.support || 0) * 2);
-    return scoreB - scoreA;
-  }).slice(0, 1200);
+  const sorted = rawLines.slice().sort((a,b) => {
+    const scoreA = (a.importance || 0) + Math.min(20,(a.support || 0)*2);
+    const scoreB = (b.importance || 0) + Math.min(20,(b.support || 0)*2);
+    return scoreB-scoreA;
+  }).slice(0,1200);
 
-  for (const l of sorted) {
-    if (!l || !l.p1 || !Number.isFinite(l.p1.x) || !Number.isFinite(l.p1.y)) continue;
-    let angle = l.angle;
+  for (const line of sorted) {
+    if (!line || !line.p1 || !Number.isFinite(line.p1.x) || !Number.isFinite(line.p1.y)) continue;
+    let angle=line.angle;
     if (!Number.isFinite(angle)) {
-      if (!l.p2 || !Number.isFinite(l.p2.x) || !Number.isFinite(l.p2.y)) continue;
-      angle = Math.atan2(l.p2.y - l.p1.y, l.p2.x - l.p1.x);
+      if (!line.p2 || !Number.isFinite(line.p2.x) || !Number.isFinite(line.p2.y)) continue;
+      angle=Math.atan2(line.p2.y-line.p1.y,line.p2.x-line.p1.x);
     }
-    const rawAngle = angle;
-    angle = canonicalLineAngle(angle);
-    let normalizedOffset = Number.isFinite(l.offset) ? l.offset : 0;
-    // canonicalLineAngle may reverse the direction vector by 180 degrees.
-    // Reverse the signed normal offset at the same time to preserve the line.
-    if (Math.cos(rawAngle - angle) < 0) normalizedOffset = -normalizedOffset;
-    const p2 = (l.p2 && Number.isFinite(l.p2.x) && Number.isFinite(l.p2.y))
-      ? l.p2
-      : { x: l.p1.x + Math.cos(angle) * Math.max(span, 1000), y: l.p1.y + Math.sin(angle) * Math.max(span, 1000) };
-    const len = dist(l.p1, p2);
-    if (!Number.isFinite(len) || len < 0.5) continue;
-
-    const signedOffset = lineSignedNormalOffset({ p1: l.p1, offset: normalizedOffset }, angle);
-    const isDup = result.some(ex =>
-      lineAngleDiff(ex.angle, angle) <= angleTolerance &&
-      Math.abs(lineSignedNormalOffset(ex, angle) - signedOffset) <= positionTolerance
+    const rawAngle=angle;
+    angle=canonicalLineAngle(angle);
+    let normalizedOffset=Number.isFinite(line.offset)?line.offset:0;
+    if(Math.cos(rawAngle-angle)<0)normalizedOffset=-normalizedOffset;
+    const p2=line.p2&&Number.isFinite(line.p2.x)&&Number.isFinite(line.p2.y)
+      ? line.p2
+      : {x:line.p1.x+Math.cos(angle)*Math.max(span,1000),y:line.p1.y+Math.sin(angle)*Math.max(span,1000)};
+    const length=dist(line.p1,p2);
+    if(!Number.isFinite(length)||length<=Number.EPSILON*100)continue;
+    const signedOffset=lineSignedNormalOffset({p1:line.p1,offset:normalizedOffset},angle);
+    const scopeKey=line.scopeKey||"global";
+    const duplicate=result.some(existing=>
+      (existing.scopeKey||"global")===scopeKey &&
+      lineAngleDiff(existing.angle,angle)<=angleTolerance &&
+      Math.abs(lineSignedNormalOffset(existing,angle)-signedOffset)<=positionTolerance
     );
-
-    if (!isDup) {
+    if(!duplicate){
       result.push({
-        p1: { x: l.p1.x, y: l.p1.y },
-        p2: { x: p2.x, y: p2.y },
-        angle: angle,
-        offset: normalizedOffset,
-        importance: l.importance || 0,
-        support: l.support || 0,
-        source: l.source || "geometry"
+        p1:{x:line.p1.x,y:line.p1.y},
+        p2:{x:p2.x,y:p2.y},
+        angle,
+        offset:normalizedOffset,
+        importance:line.importance||0,
+        support:line.support||0,
+        source:line.source||"geometry",
+        scopeKey,
+        componentId:Number.isInteger(line.componentId)?line.componentId:undefined,
+        clipBounds:line.clipBounds||undefined
       });
     }
   }
@@ -1455,6 +1455,11 @@ function buildCollisionSafeLines(lines, features, mergeDist, referenceBounds) {
     const offset = lineSignedNormalOffset(line, line.angle);
     let support = 0;
     for (const p of supportPoints) {
+      if (Number.isInteger(line.componentId)) {
+        const belongs = p.componentId === line.componentId ||
+          (Array.isArray(p.componentIds) && p.componentIds.indexOf(line.componentId) !== -1);
+        if (!belongs) continue;
+      }
       const d = Math.abs(p.x * nx + p.y * ny - offset);
       const supportTolerance = Math.max(
         Math.hypot(referenceBounds && referenceBounds.width || 0, referenceBounds && referenceBounds.height || 0) * 0.0015,
@@ -1772,37 +1777,42 @@ function bezierDerivative(b, t) {
 
 function collectDirectionEvidence(polyCurve, geom) {
   const evidence = [];
-  let totalWeight = 0;
-  let straightWeight = 0;
-  let curveWeight = 0;
-  let primitiveId = 0;
+  let totalWeight = 0, straightWeight = 0, curveWeight = 0, primitiveId = 0;
   const bounds = geom && geom.bounds ? geom.bounds : { width: 100, height: 100 };
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
   const minUsefulLength = diagonal * 0.002;
+  const components = (geom && geom.componentModel && geom.componentModel.components) || [];
 
-  // Straight vector edges retain their true length and direction.
+  function componentForCurve(curveIndex) {
+    for (const component of components) {
+      if (curveIndex >= component.curveStart &&
+          curveIndex < component.curveStart + component.curveCount) return component.id;
+    }
+    return -1;
+  }
+
   for (const seg of (geom.straightSegments || [])) {
     if (!seg || !seg.p1 || !seg.p2) continue;
     const length = dist(seg.p1, seg.p2);
     if (length < minUsefulLength) continue;
     const angle = canonicalLineAngle(Math.atan2(seg.p2.y - seg.p1.y, seg.p2.x - seg.p1.x));
     const weight = Math.min(length, diagonal * 0.75);
-    evidence.push({ angle, weight, source: 'edge', primitive: 'edge-' + primitiveId++ });
+    evidence.push({
+      angle, weight, source: "edge", primitive: "edge-" + primitiveId++,
+      componentId: Number.isInteger(seg.componentId) ? seg.componentId : -1
+    });
     straightWeight += weight;
     totalWeight += weight;
   }
 
-  // Curves contribute sampled tangent directions weighted by local arc length.
-  // A curve is sampled at five intervals, not at its anchors alone. This allows
-  // curve families to contribute without letting a highly subdivided path
-  // overwhelm the evidence from genuine straight structural edges.
   if (polyCurve && polyCurve.curveCount) {
     for (let c = 0; c < polyCurve.curveCount; c++) {
       const curve = polyCurve.at(c);
       const beziers = collectBeziers(curve);
+      const componentId = componentForCurve(c);
       for (let bIdx = 0; bIdx < beziers.length; bIdx++) {
         const b = beziers[bIdx];
-        const primitive = 'curve-' + c + '-' + bIdx;
+        const primitive = "curve-" + c + "-" + bIdx;
         const samples = [];
         for (let i = 0; i <= 5; i++) samples.push(cubicPoint(b, i / 5));
         let localCurveWeight = 0;
@@ -1816,7 +1826,7 @@ function collectDirectionEvidence(polyCurve, geom) {
           if (magnitude < EPS) continue;
           const angle = canonicalLineAngle(Math.atan2(d.y, d.x));
           const weight = Math.min(length, diagonal * 0.18) * 0.68;
-          evidence.push({ angle, weight, source: 'curve', primitive });
+          evidence.push({ angle, weight, source: "curve", primitive, componentId });
           localCurveWeight += weight;
           totalWeight += weight;
         }
@@ -1824,7 +1834,6 @@ function collectDirectionEvidence(polyCurve, geom) {
       }
     }
   }
-
   return { samples: evidence, totalWeight, straightWeight, curveWeight, diagonal };
 }
 
@@ -2343,19 +2352,75 @@ function enrichGeometryAnalysis(polyCurve, geom) {
     const localAnchors = (geom.anchors || []).filter(a =>
       a.componentIds && a.componentIds.indexOf(component.id) !== -1
     );
+    const localLandmarks = (geom.landmarks || []).filter(l => l.componentId === component.id);
     const localEdges = (geom.straightSegments || []).filter(edge => edge.componentId === component.id);
     const localAngle = localEdges.length ? detectDominantDirection(localEdges) : geom.dominantAngle;
+    const localBounds = component.bounds &&
+      Number.isFinite(component.bounds.x) && Number.isFinite(component.bounds.y) &&
+      component.bounds.width > 0 && component.bounds.height > 0
+      ? component.bounds : geom.bounds;
+    const localSamples = evidence.samples.filter(sample => sample.componentId === component.id);
+    const localEvidence = {
+      samples: localSamples,
+      totalWeight: localSamples.reduce((sum, sample) => sum + sample.weight, 0),
+      straightWeight: localSamples.filter(sample => sample.source === "edge").reduce((sum, sample) => sum + sample.weight, 0),
+      curveWeight: localSamples.filter(sample => sample.source === "curve").reduce((sum, sample) => sum + sample.weight, 0),
+      diagonal: Math.max(Number.EPSILON * 100, Math.hypot(localBounds.width, localBounds.height))
+    };
+    const localFamilies = detectDirectionFamilies(localEvidence, localAngle);
+    const localGeometry = {
+      bounds: localBounds,
+      anchors: localAnchors,
+      landmarks: localLandmarks,
+      dominantAngle: localAngle
+    };
+    const localModules = detectModularSystems(localGeometry, localFamilies);
+    const localCircleInputs = (geom.rawCircleCandidates || []).filter(circle => circle.componentId === component.id);
+    const localCircleAnalysis = refineCircleCandidates(localCircleInputs, localBounds);
     const localSymmetry = localAnchors.length >= 3
       ? detectAxisSymmetry(localAnchors, localAngle)
       : { score: 0, axis: localAngle, longitudinal: 0, transverse: 0 };
+    const localProportionRelations = [];
+    for (const axis of localModules.axes || []) {
+      for (const ratio of axis.ratios || []) {
+        if (ratio > 1) localProportionRelations.push({
+          type: "linear-module", ratio, angle: axis.angle, confidence: axis.confidence
+        });
+      }
+    }
+    for (const family of localCircleAnalysis.families || []) {
+      for (const relation of family.radiusRatios || []) {
+        localProportionRelations.push({
+          type: "circle-radius",
+          centre: { x: family.cx, y: family.cy },
+          relation,
+          confidence: relation.confidence
+        });
+      }
+    }
     return Object.assign({}, component, {
       localDominantAngle: localAngle,
+      localDirectionFamilies: localFamilies,
       localSymmetry,
-      localStraightEdgeCount: localEdges.length
+      localStraightEdgeCount: localEdges.length,
+      localAnchorCount: localAnchors.length,
+      localLandmarkCount: localLandmarks.length,
+      localModules,
+      localCircleFamilies: localCircleAnalysis.families,
+      localCircleRelationCount: localCircleAnalysis.relationCount,
+      localProportionRelations
     });
-  });
-  geom.profile = classifyGeometryProfile(geom);
+  });  geom.profile = classifyGeometryProfile(geom);
   geom.proportionRelations = [];
+  for (const component of (geom.componentAnalysis || [])) {
+    for (const relation of (component.localProportionRelations || [])) {
+      geom.proportionRelations.push(Object.assign({
+        scope: "component",
+        componentId: component.id,
+        componentLabel: component.label
+      }, relation));
+    }
+  }
   for (const axis of moduleSystems.axes) {
     for (const ratio of (axis.ratios || [])) {
       if (ratio > 1) geom.proportionRelations.push({ type: 'linear-module', angle: axis.angle, ratio: ratio, confidence: axis.confidence });
@@ -2369,8 +2434,9 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   return geom;
 }
 
-function createModuleGridCandidates(axis, bounds, origin, output, mergeTolerance) {
+function createModuleGridCandidates(axis, bounds, origin, output, mergeTolerance, options) {
   if (!axis || !Number.isFinite(axis.module) || axis.module <= 0 || axis.confidence < 0.70) return;
+  const settings = options || {};
   const nx = -Math.sin(axis.angle), ny = Math.cos(axis.angle);
   const corners = [
     { x: bounds.x, y: bounds.y },
@@ -2385,26 +2451,33 @@ function createModuleGridCandidates(axis, bounds, origin, output, mergeTolerance
   const firstK = Math.ceil((minP - axis.phase - mergeTolerance * 0.15) / axis.module);
   const lastK = Math.floor((maxP - axis.phase + mergeTolerance * 0.15) / axis.module);
   if (lastK < firstK) return;
-  // A measured module is a reference unit, not permission to cover the whole
-  // canvas with a dense lattice. Keep a compact five-line window around centre.
+
   const centreK = Math.round((originP - axis.phase) / axis.module);
-  const selectedK = [centreK,centreK-1,centreK+1,centreK-2,centreK+2]
-    .filter((k,index,array)=>k>=firstK&&k<=lastK&&array.indexOf(k)===index);
+  const maxLines = Math.max(1, Math.min(5, settings.maxLines || 5));
+  const selectedK = [centreK];
+  for (let i = 1; selectedK.length < maxLines; i++) selectedK.push(centreK - i, centreK + i);
+  const validK = selectedK.filter((k,index,array) =>
+    k >= firstK && k <= lastK && array.indexOf(k) === index
+  ).slice(0,maxLines);
+
   let ordinal = 0;
-  for (const k of selectedK) {
+  for (const k of validK) {
     const projection = axis.phase + k * axis.module;
     const offset = projection - originP;
-    const major = (ordinal % 2 === 0);
+    const major = ordinal % 2 === 0;
     output.push({
       p1: origin,
       angle: axis.angle,
       offset,
-      importance: major ? 70 : 57,
+      importance: settings.importance || (major ? 70 : 57),
       support: axis.support || 0,
-      source: 'modular-grid',
+      source: settings.source || "modular-grid",
       moduleMajor: major,
       moduleIndex: k,
-      moduleValue: axis.module
+      moduleValue: axis.module,
+      componentId: Number.isInteger(settings.componentId) ? settings.componentId : undefined,
+      scopeKey: settings.scopeKey || undefined,
+      clipBounds: settings.clipBounds || undefined
     });
     ordinal++;
   }
@@ -3090,10 +3163,37 @@ function main() {
         }
 
         if (showModulesSwitch.value && selectedProfile !== "handwriting" && geom.modules && Array.isArray(geom.modules.axes)) {
-          // Only high-confidence systems are promoted to construction modules.
-          // Their phase comes from the measured anchor/landmark positions.
           for (const axis of geom.modules.axes.slice(0, 2)) {
             createModuleGridCandidates(axis, exactBounds, exactCenter, candidates, alignmentTolerance);
+          }
+
+          // Component-level lattices remain local to their own glyph/shape.
+          // Only strong repeated spacing with sufficient independent anchors is promoted.
+          const localModuleComponents = (geom.componentAnalysis || [])
+            .filter(component => component.localAnchorCount >= 6 &&
+              component.localModules && component.localModules.axes &&
+              component.localModules.axes.length &&
+              component.localModules.axes[0].confidence >= 0.82 &&
+              component.localModules.axes[0].pointCount >= 6)
+            .sort((a,b) => b.localModules.axes[0].confidence - a.localModules.axes[0].confidence)
+            .slice(0,3);
+
+          for (const component of localModuleComponents) {
+            const bounds = component.bounds;
+            if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) continue;
+            const centre = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+            createModuleGridCandidates(
+              component.localModules.axes[0], bounds, centre, candidates,
+              effectiveMergeDistance,
+              {
+                maxLines:3,
+                importance:61,
+                source:"component-modular-grid",
+                componentId:component.id,
+                scopeKey:"component:"+component.id,
+                clipBounds:bounds
+              }
+            );
           }
         }
 
@@ -3113,9 +3213,10 @@ function main() {
         const baseGuideBudget = gridMode === 2 ? 28 : (gridMode === 3 ? 22 : profileBudget);
         const guideBudget = Math.max(10, Math.round(baseGuideBudget * detailFactor));
         for (const line of cleanLines.slice(0, guideBudget)) {
-          const clipBounds = (line.source === "bounding-box-edge" || line.source === "bounding-box-diagonal")
-            ? exactBounds
-            : constructionBounds;
+          const clipBounds = line.clipBounds ||
+            ((line.source === "bounding-box-edge" || line.source === "bounding-box-diagonal")
+              ? exactBounds
+              : constructionBounds);
           const ext = extendLineToRect(line, clipBounds);
           if (!ext || dist(ext.p1, ext.p2) <= Number.EPSILON * 100) continue;
           appendStyledGridLine(defs, line, ext, gridStrokeStyles, noFill);
