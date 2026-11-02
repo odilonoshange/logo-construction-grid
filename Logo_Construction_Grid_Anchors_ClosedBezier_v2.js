@@ -2620,22 +2620,32 @@ function createModuleGridCandidates(axis, bounds, origin, output, mergeTolerance
   }
 }
 
-function addCircleFamilyConstructionCandidates(circleFamilies, output) {
-  for (const family of (circleFamilies || []).slice(0, 4)) {
-    if (!family || family.circles.length < 2 || family.confidence < 0.42) continue;
-    const circles = family.circles.slice().sort((a, b) => a.r - b.r);
+function addCircleFamilyConstructionCandidates(circleFamilies, output, options) {
+  const settings = options || {};
+  for (const family of (circleFamilies || []).slice(0, settings.maxFamilies || 4)) {
+    if (!family || family.circles.length < 2 || family.confidence < (settings.minConfidence || 0.42)) continue;
+    const circles = family.circles.slice().sort((a,b) => a.r-b.r);
     const hasMeasuredRelation = family.radiusRatios.length > 0 || family.radiusModuleConfidence >= 0.60;
     if (!hasMeasuredRelation) continue;
-    // The centre axes and outer ring tangencies express the measured diameters.
-    output.push({ p1: { x: family.cx, y: family.cy }, angle: 0, importance: 64, source: 'circle-centre-axis' });
-    output.push({ p1: { x: family.cx, y: family.cy }, angle: Math.PI / 2, importance: 64, source: 'circle-centre-axis' });
-    for (const circle of circles.slice(0, 3)) {
-      const r = circle.r;
-      const importance = 48 + circle.confidence * 8;
-      output.push({ p1: { x: family.cx + r, y: family.cy }, angle: Math.PI / 2, importance, source: 'circle-ratio-boundary' });
-      output.push({ p1: { x: family.cx - r, y: family.cy }, angle: Math.PI / 2, importance, source: 'circle-ratio-boundary' });
-      output.push({ p1: { x: family.cx, y: family.cy + r }, angle: 0, importance, source: 'circle-ratio-boundary' });
-      output.push({ p1: { x: family.cx, y: family.cy - r }, angle: 0, importance, source: 'circle-ratio-boundary' });
+
+    const metadata = {
+      componentId: Number.isInteger(settings.componentId) ? settings.componentId : undefined,
+      scopeKey: settings.scopeKey || undefined,
+      clipBounds: settings.clipBounds || undefined
+    };
+    const axisImportance = settings.importance || 64;
+    const axisSource = settings.axisSource || "circle-centre-axis";
+    const boundarySource = settings.boundarySource || "circle-ratio-boundary";
+    output.push(Object.assign({p1:{x:family.cx,y:family.cy},angle:0,importance:axisImportance,source:axisSource},metadata));
+    output.push(Object.assign({p1:{x:family.cx,y:family.cy},angle:Math.PI/2,importance:axisImportance,source:axisSource},metadata));
+
+    for (const circle of circles.slice(0,settings.maxRings||3)) {
+      const radius=circle.r;
+      const importance=settings.importance || (48+circle.confidence*8);
+      output.push(Object.assign({p1:{x:family.cx+radius,y:family.cy},angle:Math.PI/2,importance,source:boundarySource},metadata));
+      output.push(Object.assign({p1:{x:family.cx-radius,y:family.cy},angle:Math.PI/2,importance,source:boundarySource},metadata));
+      output.push(Object.assign({p1:{x:family.cx,y:family.cy+radius},angle:0,importance,source:boundarySource},metadata));
+      output.push(Object.assign({p1:{x:family.cx,y:family.cy-radius},angle:0,importance,source:boundarySource},metadata));
     }
   }
 }
@@ -3310,6 +3320,37 @@ function main() {
         // remain in their independent layer.
         if ((showCirclesSwitch.value || showModulesSwitch.value) && geom.circleFamilies && geom.circleFamilies.length > 0) {
           addCircleFamilyConstructionCandidates(geom.circleFamilies, candidates);
+        }
+
+        if (showModulesSwitch.value) {
+          const localCircleComponents = (geom.componentAnalysis || [])
+            .map(component => {
+              const family = (component.localCircleFamilies || [])
+                .filter(item => item.circles.length >= 2 &&
+                  item.confidence >= 0.78 &&
+                  (item.radiusRatios.length > 0 || item.radiusModuleConfidence >= 0.75))
+                .sort((a,b) => b.confidence-a.confidence)[0];
+              return family ? {component,family} : null;
+            })
+            .filter(Boolean)
+            .sort((a,b) => b.family.confidence-a.family.confidence)
+            .slice(0,2);
+
+          for (const item of localCircleComponents) {
+            const bounds = item.component.bounds;
+            if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) continue;
+            addCircleFamilyConstructionCandidates([item.family],candidates,{
+              maxFamilies:1,
+              maxRings:2,
+              minConfidence:0.78,
+              importance:63,
+              axisSource:"component-circle-centre-axis",
+              boundarySource:"component-circle-ratio-boundary",
+              componentId:item.component.id,
+              scopeKey:"component:"+item.component.id,
+              clipBounds:bounds
+            });
+          }
         }
 
         if (showSymmetrySwitch.value && initialGridSymmetry.score >= 0.70) {
