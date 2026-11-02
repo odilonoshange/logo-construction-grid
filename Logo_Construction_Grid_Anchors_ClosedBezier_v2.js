@@ -2228,59 +2228,6 @@ function addCircleFamilyConstructionCandidates(circleFamilies, output) {
   }
 }
 
-function makeModuleSpacingGuides(axis, bounds, frameBounds, requestedMargin) {
-  if (!axis || !bounds || !frameBounds || axis.confidence < 0.70 || axis.module <= 0) return [];
-  const angle = axis.angle;
-  const ux = Math.cos(angle), uy = Math.sin(angle);
-  const nx = -uy, ny = ux;
-  const corners = [
-    { x: bounds.x, y: bounds.y },
-    { x: bounds.x + bounds.width, y: bounds.y },
-    { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
-    { x: bounds.x, y: bounds.y + bounds.height }
-  ];
-  const frameCorners = [
-    { x: frameBounds.x, y: frameBounds.y },
-    { x: frameBounds.x + frameBounds.width, y: frameBounds.y },
-    { x: frameBounds.x + frameBounds.width, y: frameBounds.y + frameBounds.height },
-    { x: frameBounds.x, y: frameBounds.y + frameBounds.height }
-  ];
-  const projectU = p => p.x * ux + p.y * uy;
-  const projectN = p => p.x * nx + p.y * ny;
-  const maxU = Math.max.apply(null, corners.map(projectU));
-  const minN = Math.min.apply(null, corners.map(projectN));
-  const maxN = Math.max.apply(null, corners.map(projectN));
-  const frameMaxU = Math.max.apply(null, frameCorners.map(projectU));
-  const available = frameMaxU - maxU;
-  if (available < Math.max(9, axis.module * 0.35)) return [];
-  const preferred = Math.max(8, Math.min(Number(requestedMargin) || 0, Math.hypot(bounds.width, bounds.height) * 0.16));
-  const uPos = maxU + Math.min(available * 0.72, preferred * 0.65);
-  const midN = (minN + maxN) / 2;
-  let k = Math.floor((midN - axis.phase) / axis.module);
-  let q1 = axis.phase + k * axis.module;
-  let q2 = q1 + axis.module;
-  if (q1 < minN - EPS || q2 > maxN + EPS) {
-    k = Math.ceil((midN - axis.phase) / axis.module) - 1;
-    q1 = axis.phase + k * axis.module;
-    q2 = q1 + axis.module;
-  }
-  if (q1 < minN - EPS || q2 > maxN + EPS) return [];
-
-  function pointAt(q, u) {
-    return { x: ux * u + nx * q, y: uy * u + ny * q };
-  }
-  const a = pointAt(q1, uPos), b = pointAt(q2, uPos);
-  const tick = clamp(axis.module * 0.12, 3, 7);
-  const a1 = { x: a.x - ux * tick, y: a.y - uy * tick };
-  const a2 = { x: a.x + ux * tick, y: a.y + uy * tick };
-  const b1 = { x: b.x - ux * tick, y: b.y - uy * tick };
-  const b2 = { x: b.x + ux * tick, y: b.y + uy * tick };
-  return [
-    { p1: a, p2: b, source: 'module-dimension' },
-    { p1: a1, p2: a2, source: 'module-dimension-tick' },
-    { p1: b1, p2: b2, source: 'module-dimension-tick' }
-  ];
-}
 
 function readPickerRGBA(picker, fallback) {
   try {
@@ -2328,11 +2275,6 @@ function appendStyledGridLine(defs, line, ext, styles, noFill) {
     defs.push(PolyCurveNodeDefinition.create(
       makeLinePoly(a.x, a.y, b.x, b.y), noFill, style.fill, style.lineStyle, noFill
     ));
-  }
-
-  if (line.source === 'module-dimension' || line.source === 'module-dimension-tick') {
-    add(ext.p1, ext.p2, styles.dimension);
-    return;
   }
 
   const isPrimary = line.source === 'structural-edge' ||
@@ -2460,7 +2402,7 @@ function main() {
 
   const showSymmetrySwitch = gridGrp.addSwitch("Detected Symmetry", initialHasSymmetry);
   const showModulesSwitch = gridGrp.addSwitch("Proportions / Modules", initialHasModules);
-  const showLandmarksSwitch = gridGrp.addSwitch("Geometric Landmarks", true);
+  const showLandmarksSwitch = gridGrp.addSwitch("Geometric Landmarks", false);
   const showInflectionSwitch = gridGrp.addSwitch("Inflection Points", initialHasInflections);
 
   attachTip(gridModeCombo, "Smart Adaptive combina famílias de direcções suportadas por arestas e tangentes Bézier. Evita impor uma única orientação a logótipos com várias estruturas.");
@@ -2472,8 +2414,8 @@ function main() {
   attachTip(mergeDistCtrl, "Define a tolerância para agrupar linhas paralelas quase coincidentes. Valores maiores reduzem detalhes próximos e tornam a grelha menos densa.");
   attachTip(tangentSourceCombo, "Define a origem das linhas de projeção técnica.");
   attachTip(showSymmetrySwitch, "Traça o eixo mestre de simetria do logo.");
-  attachTip(showModulesSwitch, "Detecta módulos lineares repetidos, relações entre raios circulares e espaçamentos comprovados. Só apresenta sistemas com confiança geométrica suficiente.");
-  attachTip(showLandmarksSwitch, "Destaca extremos cardeais, centros e ápices da forma.");
+  attachTip(showModulesSwitch, "Detecta módulos lineares repetidos e relações entre raios circulares. Só apresenta sistemas com confiança geométrica suficiente.");
+  attachTip(showLandmarksSwitch, "Destaca extremos analíticos, cúspides e pontos estacionários de Bézier que não coincidem com âncoras nativas.");
   attachTip(showInflectionSwitch, "Destaca pontos de inflexão de curvas S.");
 
   // --- COLUNA 2: Marcadores, Traços & Cores (100% Restaurada) ---
@@ -2599,6 +2541,10 @@ function main() {
   // =========================================================================
   function buildGridStructure() {
     const geom = getCachedGeometry(anchorSizeCtrl.value, handleSizeCtrl.value);
+    const landmarkCoincidenceTolerance = Math.max(
+      1e-5,
+      Math.hypot(geom.bounds.width, geom.bounds.height) * 1e-7
+    );
     const minGap = minNodeGapCtrl.value;
     const smartCollision = adaptiveScaleSwitch.value;
     const isHandleFixed = handleScalingCombo.selectedIndex === 1;
@@ -2626,14 +2572,9 @@ function main() {
       for (const a of displayAnchors) handleObstacles.push(a);
     }
     if (showLandmarksSwitch.value) {
-      for (const a of displayAnchors) {
-        if (a.corner || a.cusp || a.extrema || a.endpoint || (a.curvatureImportance || 0) >= 7.5) {
-          handleObstacles.push({ x: a.x, y: a.y, halfSize: Math.max(1.2, a.halfSize * 0.65) / Math.SQRT2 });
-        }
-      }
       for (const l of geom.landmarks) {
         if (l.type !== "extrema" && l.type !== "cusp" && l.type !== "stationary") continue;
-        if (displayAnchors.some(a => dist(a, l) < Math.max(2.5, a.halfSize * 1.4))) continue;
+        if (geom.anchors.some(a => dist(a, l) <= landmarkCoincidenceTolerance)) continue;
         handleObstacles.push({ x: l.x, y: l.y, halfSize: Math.max(1.0, landmarkSizeCtrl.value / 2) });
       }
     }
@@ -2952,34 +2893,20 @@ function main() {
           appendStyledGridLine(defs, line, ext, gridStrokeStyles, noFill);
         }
 
-        // Dimension brackets are generated only when there is real free space
-        // outside the mark and a measured module interval fits inside the mark.
-        if (showModulesSwitch.value && geom.modules && Array.isArray(geom.modules.axes)) {
-          for (const axis of geom.modules.axes.slice(0, 2)) {
-            const dimensionGuides = makeModuleSpacingGuides(
-              axis, exactBounds, constructionBounds, gridReachCtrl.value
-            );
-            for (const guide of dimensionGuides) {
-              const ext = { p1: guide.p1, p2: guide.p2 };
-              appendStyledGridLine(defs, guide, ext, gridStrokeStyles, noFill);
-            }
-          }
-        }
+
       }
       if (defs.length) subContainers.push({ name: "3. Construction Gridlines", defs: defs });
     }
 
     // 4. Geometric Landmarks
+    // Only derived curve events are shown here. Native path vertices remain
+    // exclusively in Anchor Nodes, avoiding a second marker over the same node.
     if (showLandmarksSwitch.value) {
       const defs = [];
       const baseLandmarkR = Math.max(1.0, landmarkSizeCtrl.value / 2);
-      for (const a of displayAnchors) {
-        if (!a.corner && !a.cusp && !a.extrema && !a.endpoint && (a.curvatureImportance || 0) < 7.5) continue;
-        defs.push(PolyCurveNodeDefinition.create(makeSmoothCirclePoly(a.x, a.y, Math.max(1.2, a.halfSize * 0.65)), landmarkFillDesc, landmarkStrokeDesc, lsdNode, noFill));
-      }
       for (const l of geom.landmarks) {
         if (l.type !== "extrema" && l.type !== "cusp" && l.type !== "stationary") continue;
-        if (displayAnchors.some(a => dist(a, l) < Math.max(2.5, a.halfSize * 1.4))) continue;
+        if (geom.anchors.some(a => dist(a, l) <= landmarkCoincidenceTolerance)) continue;
         const markerRadius = l.type === "cusp" ? baseLandmarkR * 1.25 : baseLandmarkR;
         defs.push(PolyCurveNodeDefinition.create(makeSmoothCirclePoly(l.x, l.y, markerRadius), landmarkFillDesc, landmarkStrokeDesc, lsdNode, noFill));
       }
