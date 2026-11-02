@@ -638,10 +638,11 @@ function fitCircleToBezier(b) {
 
 function buildDisplayArcCandidates(rawCandidates, bounds) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const minRadius = diagonal * 0.0035;
+  const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
+  const minRadius = minorDimension * 0.0035;
   const maxRadius = diagonal * 2.25;
   const centreMargin = diagonal * 1.25;
-  const centreTolerance = diagonal * 0.0005;
+  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0005);
   const arcs = [];
 
   for (const candidate of (rawCandidates || [])) {
@@ -2284,9 +2285,10 @@ function approximateSmallRatio(value, maxTerm) {
 
 function refineCircleCandidates(rawCircles, bounds) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const minRadius = diagonal * 0.0035;
+  const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
+  const minRadius = minorDimension * 0.0035;
   const maxRadius = diagonal * 2.25;
-  const centreTolerance = diagonal * 0.0045;
+  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0045);
   const unique = [];
 
   for (const input of (rawCircles || [])) {
@@ -2339,7 +2341,7 @@ function refineCircleCandidates(rawCircles, bounds) {
     const radiusTiers = [];
     for (const circle of family.circles) {
       const last = radiusTiers[radiusTiers.length - 1];
-      if (last && Math.abs(circle.r - last.r) <= Math.max(1.3, circle.r * 0.022)) {
+      if (last && Math.abs(circle.r - last.r) <= Math.max(minorDimension * 0.0006, circle.r * 0.022)) {
         const n = last.samples + circle.samples;
         last.r = (last.r * last.samples + circle.r * circle.samples) / n;
         last.confidence = Math.max(last.confidence, circle.confidence);
@@ -2364,7 +2366,7 @@ function refineCircleCandidates(rawCircles, bounds) {
     if (gaps.length >= 2) {
       const sortedGaps = gaps.slice().sort((a, b) => a - b);
       const median = sortedGaps[Math.floor(sortedGaps.length / 2)];
-      const close = gaps.filter(g => Math.abs(g - median) <= Math.max(1.2, median * 0.045));
+      const close = gaps.filter(g => Math.abs(g - median) <= Math.max(minorDimension * 0.0006, median * 0.045));
       if (median >= minRadius && close.length >= 2) {
         radiusModule = close.reduce((sum, g) => sum + g, 0) / close.length;
         radiusModuleConfidence = close.length / gaps.length * family.confidence;
