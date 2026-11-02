@@ -2263,8 +2263,7 @@ function createGridStrokeStyles(picker, baseWidth) {
     auxiliary: makeStyle(0.56, 0.76),
     fadeNear: makeStyle(0.20, 0.58),
     fadeMid: makeStyle(0.38, 0.66),
-    fadeFar: makeStyle(0.64, 0.78),
-    dimension: makeStyle(0.92, 0.92)
+    fadeFar: makeStyle(0.64, 0.78)
   };
 }
 
