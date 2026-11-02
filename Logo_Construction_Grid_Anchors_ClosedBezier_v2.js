@@ -657,7 +657,7 @@ function buildDisplayArcCandidates(rawCandidates, bounds) {
 
     const duplicate = arcs.some(existing =>
       Math.hypot(existing.cx - candidate.cx, existing.cy - candidate.cy) <= centreTolerance &&
-      Math.abs(existing.r - candidate.r) <= Math.max(diagonal * 0.0006, candidate.r * 0.022) &&
+      Math.abs(existing.r - candidate.r) <= Math.max(minorDimension * 0.0006, candidate.r * 0.022) &&
       Math.abs(existing.startAngle - candidate.startAngle) <= 1.0 * DEG &&
       Math.abs(existing.sweep - candidate.sweep) <= 1.0 * DEG
     );
@@ -1229,6 +1229,10 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
   };
   const objectScaleContext = createGeometryScaleContext(bounds);
   const featureLengthFloor = objectScaleContext.featureLength;
+  const circleFeatureScale = Math.max(
+    objectScaleContext.diagonal * 0.04,
+    Math.min(Math.abs(bounds.width), Math.abs(bounds.height))
+  );
   const center = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
 
   // Identificação topológica de pétalas e cortes (caso existam formas poligonais)
@@ -1285,7 +1289,10 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
   // Círculos de Bézier analíticos
   const uniqueCircles = [];
   for (const c of rawCircles) {
-    const match = uniqueCircles.find(ex => dist(ex, c) < Math.max(objectScaleContext.diagonal * 0.001, c.r * 0.04) && Math.abs(ex.r - c.r) < Math.max(objectScaleContext.diagonal * 0.0008, c.r * 0.035));
+    const match = uniqueCircles.find(ex =>
+      dist(ex, c) < Math.max(objectScaleContext.diagonal * 0.0005, circleFeatureScale * 0.001) &&
+      Math.abs(ex.r - c.r) < Math.max(circleFeatureScale * 0.0008, c.r * 0.035)
+    );
     if (!match) {
       uniqueCircles.push({ cx: c.cx, cy: c.cy, r: c.r, confidence: c.confidence });
     }
@@ -2304,7 +2311,7 @@ function refineCircleCandidates(rawCircles, bounds) {
 
     const existing = unique.find(c =>
       Math.hypot(c.cx - input.cx, c.cy - input.cy) <= centreTolerance &&
-      Math.abs(c.r - input.r) <= Math.max(diagonal * 0.0006, input.r * 0.022)
+      Math.abs(c.r - input.r) <= Math.max(minorDimension * 0.0006, input.r * 0.022)
     );
     if (existing) {
       const total = existing.weight + confidence;
