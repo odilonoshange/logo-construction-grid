@@ -1780,7 +1780,7 @@ function collectDirectionEvidence(polyCurve, geom) {
   let totalWeight = 0, straightWeight = 0, curveWeight = 0, primitiveId = 0;
   const bounds = geom && geom.bounds ? geom.bounds : { width: 100, height: 100 };
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const minUsefulLength = diagonal * 0.002;
+  const globalMinUsefulLength = diagonal * 0.002;
   const components = (geom && geom.componentModel && geom.componentModel.components) || [];
 
   function componentForCurve(curveIndex) {
@@ -1794,9 +1794,13 @@ function collectDirectionEvidence(polyCurve, geom) {
   for (const seg of (geom.straightSegments || [])) {
     if (!seg || !seg.p1 || !seg.p2) continue;
     const length = dist(seg.p1, seg.p2);
-    if (length < minUsefulLength) continue;
+    const component = components.find(item => item.id === seg.componentId);
+    const componentDiagonal = component && component.bounds
+      ? Math.hypot(component.bounds.width, component.bounds.height)
+      : diagonal;
+    if (length < (component ? componentDiagonal : diagonal) * 0.002) continue;
     const angle = canonicalLineAngle(Math.atan2(seg.p2.y - seg.p1.y, seg.p2.x - seg.p1.x));
-    const weight = Math.min(length, diagonal * 0.75);
+    const weight = Math.min(length, (component ? componentDiagonal : diagonal) * 0.75);
     evidence.push({
       angle, weight, source: "edge", primitive: "edge-" + primitiveId++,
       componentId: Number.isInteger(seg.componentId) ? seg.componentId : -1
@@ -1810,6 +1814,11 @@ function collectDirectionEvidence(polyCurve, geom) {
       const curve = polyCurve.at(c);
       const beziers = collectBeziers(curve);
       const componentId = componentForCurve(c);
+      const component = components.find(item => item.id === componentId);
+      const componentDiagonal = component && component.bounds
+        ? Math.hypot(component.bounds.width, component.bounds.height)
+        : diagonal;
+      const minUsefulLength = (component ? componentDiagonal : diagonal) * 0.002;
       for (let bIdx = 0; bIdx < beziers.length; bIdx++) {
         const b = beziers[bIdx];
         const primitive = "curve-" + c + "-" + bIdx;
@@ -2393,7 +2402,9 @@ function enrichGeometryAnalysis(polyCurve, geom) {
       landmarks: localLandmarks,
       dominantAngle: localAngle
     };
-    const localModules = detectModularSystems(localGeometry, localFamilies);
+    const localModules = localSamples.length
+      ? detectModularSystems(localGeometry, localFamilies)
+      : { module: 0, phase: 0, angle: 0, ratios: [], confidence: 0, axes: [] };
     const localCircleInputs = localData.circles;
     const localCircleAnalysis = refineCircleCandidates(localCircleInputs, localBounds);
     const localSymmetry = localAnchors.length >= 3
