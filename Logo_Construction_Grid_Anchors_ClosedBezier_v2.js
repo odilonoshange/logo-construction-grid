@@ -2819,8 +2819,8 @@ function main() {
                   if (dA < desiredSpan + radialClearance) deltaA = Math.min(deltaA, Math.max(0, dA - radialClearance));
 
                   const dB = dist(cap.p2, opt);
-                  const radialClearance = initialScaleContext.diagonal * 0.006;
-                  if (dB < desiredSpan + radialClearance) deltaB = Math.min(deltaB, Math.max(0, dB - radialClearance));
+                  const radialClearanceB = initialScaleContext.diagonal * 0.006;
+                  if (dB < desiredSpan + radialClearanceB) deltaB = Math.min(deltaB, Math.max(0, dB - radialClearanceB));
                 }
               }
             }
