@@ -1817,18 +1817,21 @@ function mergeProjectedPositions(points, angle, tolerance) {
 
 function evaluateProjectedModule(points, bounds, angle, directionWeight) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const tolerance = diagonal * 0.0022;
+  const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
+  // A wordmark's width must not erase the small but real spacing unit between
+  // glyphs. Use the minor mark dimension as the second scale reference.
+  const tolerance = Math.max(diagonal * 0.0003, minorDimension * 0.0022);
   const positions = mergeProjectedPositions(points, angle, tolerance);
   if (positions.length < 5) return null;
 
   const gaps = [];
   for (let i = 1; i < positions.length; i++) {
     const gap = positions[i].mean - positions[i - 1].mean;
-    if (gap >= diagonal * 0.008 && gap <= diagonal * 0.55) gaps.push(gap);
+    if (gap >= Math.max(diagonal * 0.0018, minorDimension * 0.008) && gap <= diagonal * 0.55) gaps.push(gap);
   }
   if (gaps.length < 3) return null;
 
-  const minUnit = diagonal * 0.009;
+  const minUnit = Math.max(diagonal * 0.0018, minorDimension * 0.009);
   const maxUnit = diagonal * 0.36;
   const rawCandidates = [];
   for (const gap of gaps) {
