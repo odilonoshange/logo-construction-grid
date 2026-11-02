@@ -103,26 +103,71 @@ function extractPolyCurvesFromSingleNode(node) {
 
 function extractCompositePolyCurve(rootNodes) {
   const masterPoly = PolyCurve.create();
-  let count = 0;
+  const components = [];
+  const groups = [];
+  let totalCurveCount = 0;
+  let maxDepth = 0;
 
-  function traverse(node) {
+  function getNodeLabel(node, fallback) {
+    try {
+      const value = node && (node.name || node.label || node.displayName);
+      if (typeof value === "string" && value.trim()) return value.trim();
+    } catch (e) {}
+    return fallback;
+  }
+
+  function traverse(node, depth, parentGroupIds) {
     if (!node || isEmbeddedDocumentNode(node)) return;
+    maxDepth = Math.max(maxDepth, depth);
 
-    const directPc = extractPolyCurvesFromSingleNode(node);
-    if (directPc && directPc.curveCount > 0) {
-      for (let c = 0; c < directPc.curveCount; c++) {
-        masterPoly.addCurve(directPc.at(c).clone());
-        count++;
-      }
+    const children = toArray(node.children);
+    if (children.length > 0) {
+      const groupId = groups.length;
+      groups.push({
+        id: groupId,
+        label: getNodeLabel(node, "Group " + (groupId + 1)),
+        depth,
+        parentGroupIds: parentGroupIds.slice(),
+        childCount: children.length
+      });
+      const nextParents = parentGroupIds.concat(groupId);
+      for (const child of children) traverse(child, depth + 1, nextParents);
       return;
     }
 
-    const children = toArray(node.children);
-    for (const child of children) traverse(child);
+    const directPc = extractPolyCurvesFromSingleNode(node);
+    if (!directPc || directPc.curveCount <= 0) return;
+
+    const curveStart = totalCurveCount;
+    for (let c = 0; c < directPc.curveCount; c++) {
+      masterPoly.addCurve(directPc.at(c).clone());
+      totalCurveCount++;
+    }
+
+    let bounds = null;
+    try { bounds = getExactCurveBounds(directPc); } catch (e) {}
+    components.push({
+      id: components.length,
+      label: getNodeLabel(node, "Component " + (components.length + 1)),
+      depth,
+      parentGroupIds: parentGroupIds.slice(),
+      curveStart,
+      curveCount: directPc.curveCount,
+      bounds
+    });
   }
 
-  for (const n of rootNodes) traverse(n);
-  return count > 0 ? masterPoly : null;
+  for (const node of (rootNodes || [])) traverse(node, 0, []);
+  if (totalCurveCount === 0) return null;
+  return {
+    polyCurve: masterPoly,
+    components,
+    groups,
+    componentCount: components.length,
+    groupCount: groups.length,
+    totalCurveCount,
+    maxDepth
+  };
 }
 
 function makeSmoothCirclePoly(cx, cy, r) {
@@ -2201,15 +2246,17 @@ function classifyGeometryProfile(geom) {
   const circleCount=(geom.circleFamilies||[]).filter(f=>f&&f.confidence>=0.55&&f.circles&&f.circles.length>=2).length;
   const circleSignal=clamp(circleCount/2,0,1);
   const multiContour=clamp(((geom.contourCount||0)-1)/4,0,1);
+  const componentCount = Math.max(1, (geom.componentModel && geom.componentModel.componentCount) || 1);
+  const componentSignal = clamp((componentCount - 1) / 5, 0, 1);
   const scores={
     geometric:clamp(0.24*straightRatio+0.24*symmetry+0.24*moduleConfidence+0.20*circleSignal+0.08*(1-openRatio),0,1),
-    typographic:clamp(0.20*clamp((aspect-1.1)/2.4,0,1)+0.25*multiContour+0.18*straightRatio+0.17*curveRatio+0.20*(1-openRatio),0,1),
+    typographic:clamp(0.16*clamp((aspect-1.1)/2.4,0,1)+0.20*multiContour+0.20*componentSignal+0.16*straightRatio+0.14*curveRatio+0.14*(1-openRatio),0,1),
     handwriting:clamp(0.38*openRatio+0.30*curveRatio+0.18*(1-symmetry)+0.14*(1-straightRatio),0,1),
     organic:clamp(0.48*curveRatio+0.24*(1-symmetry)+0.16*(1-moduleConfidence)+0.12*(1-circleSignal),0,1),
     radial:geom.isRadialArray?1:0
   };
   const ranked=Object.keys(scores).sort((a,b)=>scores[b]-scores[a]);
-  return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour}};
+  return {suggested:ranked[0],confidence:scores[ranked[0]],scores,metrics:{straightRatio,curveRatio,openRatio,aspect,symmetry,moduleConfidence,circleSignal,multiContour,componentCount,componentSignal}};
 }
 
 function enrichGeometryAnalysis(polyCurve, geom) {
@@ -2339,9 +2386,6 @@ function createGridStrokeStyles(picker, baseWidth) {
     primary: makeStyle(1.0, 1.22),
     secondary: makeStyle(0.78, 0.96),
     auxiliary: makeStyle(0.56, 0.76),
-    fadeNear: makeStyle(0.20, 0.58),
-    fadeMid: makeStyle(0.38, 0.66),
-    fadeFar: makeStyle(0.64, 0.78)
   };
 }
 
@@ -2362,26 +2406,9 @@ function appendStyledGridLine(defs, line, ext, styles, noFill) {
     line.source === 'circle-centre-axis' || line.source === 'circle-ratio-boundary' ||
     (line.importance || 0) >= 60;
 
-  if (isPrimary) {
-    add(ext.p1, ext.p2, styles.primary);
-    return;
-  }
-  if (isSecondary) {
-    add(ext.p1, ext.p2, styles.secondary);
-    return;
-  }
-
-  // A lightweight five-part taper approximates line fade at both frame edges.
-  // The central section remains visible; the real geometry and endpoints do not move.
-  const dx = ext.p2.x - ext.p1.x;
-  const dy = ext.p2.y - ext.p1.y;
-  const tValues = [0, 0.12, 0.28, 0.72, 0.88, 1];
-  const segmentStyles = [styles.fadeNear, styles.fadeMid, styles.fadeFar, styles.fadeMid, styles.fadeNear];
-  for (let i = 0; i < segmentStyles.length; i++) {
-    const a = { x: ext.p1.x + dx * tValues[i], y: ext.p1.y + dy * tValues[i] };
-    const b = { x: ext.p1.x + dx * tValues[i + 1], y: ext.p1.y + dy * tValues[i + 1] };
-    add(a, b, segmentStyles[i]);
-  }
+  if (isPrimary) add(ext.p1, ext.p2, styles.primary);
+  else if (isSecondary) add(ext.p1, ext.p2, styles.secondary);
+  else add(ext.p1, ext.p2, styles.auxiliary || styles.secondary);
 }
 
 function main() {
@@ -2397,7 +2424,16 @@ function main() {
   }
 
   const primaryNode = rawSel[0];
-  const polyCurve = extractCompositePolyCurve(rawSel);
+  const extractedGeometry = extractCompositePolyCurve(rawSel);
+  const polyCurve = extractedGeometry ? extractedGeometry.polyCurve : null;
+  const componentModel = extractedGeometry ? {
+    components: extractedGeometry.components,
+    groups: extractedGeometry.groups,
+    componentCount: extractedGeometry.componentCount,
+    groupCount: extractedGeometry.groupCount,
+    totalCurveCount: extractedGeometry.totalCurveCount,
+    maxDepth: extractedGeometry.maxDepth
+  } : null;
   if (!polyCurve || polyCurve.curveCount === 0) {
     alert("Não foi possível extrair vetores válidos do objeto ou grupo selecionado.");
     return;
@@ -2410,7 +2446,9 @@ function main() {
     if (ext && ext.width > 0) spreadExtents = ext;
   } catch (e) {}
 
-  const initialGeom = enrichGeometryAnalysis(polyCurve, analyzeSmartGeometry(polyCurve, 9, 9));
+  const initialBaseGeometry = analyzeSmartGeometry(polyCurve, 9, 9);
+  initialBaseGeometry.componentModel = componentModel;
+  const initialGeom = enrichGeometryAnalysis(polyCurve, initialBaseGeometry);
   const initialExactBounds = getExactCurveBounds(polyCurve) || initialGeom.bounds;
   const initialScaleContext = createGeometryScaleContext(initialExactBounds);
   const initialPreciseAngle = initialGeom.directionFamilies && initialGeom.directionFamilies.length
@@ -2491,7 +2529,7 @@ function main() {
   const showLandmarksSwitch = gridGrp.addSwitch("Geometric Landmarks", false);
   const showInflectionSwitch = gridGrp.addSwitch("Inflection Points", initialHasInflections);
 
-  attachTip(analysisProfileCombo, "Perfil sugerido por métricas geométricas: " + initialGeom.profile.suggested + ". A escolha automática é heurística. Os perfis manuais alteram a selecção de guias, mas não fazem reconhecimento semântico de letras.");
+  attachTip(analysisProfileCombo, "Perfil sugerido por métricas geométricas: " + initialGeom.profile.suggested + ". Componentes vectoriais: " + ((componentModel && componentModel.componentCount) || 1) + "; grupos: " + ((componentModel && componentModel.groupCount) || 0) + ". A escolha automática é heurística, não reconhecimento semântico de letras.");
   attachTip(gridModeCombo, "Smart Adaptive combina famílias de direcções suportadas por arestas e tangentes Bézier. Evita impor uma única orientação a logótipos com várias estruturas.");
   attachTip(nodeDisplayCombo, "Controla quais nós são destacados. A análise conserva nós distintos mesmo em curvas muito fechadas; Auto reduz apenas marcadores de baixa prioridade quando há pouco espaço.");
   attachTip(adaptiveScaleSwitch, "Reduz automaticamente marcadores e suprime linhas em áreas densas para evitar poluição visual.");
@@ -2526,7 +2564,7 @@ function main() {
   attachTip(landmarkSizeCtrl, "Diâmetro dos marcadores de extremos e eventos de curva.");
   attachTip(scaleMarkersSwitch, "Quando activo, os tamanhos dos marcadores, as distâncias de colisão, a tolerância de fusão e a margem da grelha acompanham a dimensão do objecto. Os valores dos controlos são referências para uma geometria de 600 × 600 unidades de coordenadas.");
   attachTip(handleScalingCombo, "'Automatic' reduz pontos em zonas densas e oculta os que colidiriam; 'Fixed' mantém o diâmetro, com filtragem dos conflitos inevitáveis.");
-  attachTip(stemScaleCombo, "Mantém o ponto na posição Bézier real; os valores acima de 1x prolongam apenas a haste, para além do ponto.");
+  attachTip(stemScaleCombo, "Nos valores acima de 1x, a haste e o marcador principal são projectados juntos para a nova extremidade. Um pequeno anel vazado mantém visível a posição Bézier real do ponto de controlo.");
   attachTip(anchorStyleCombo, "Estilo de renderização dos nós das âncoras.");
   attachTip(handleStyleCombo, "Estilo de renderização dos círculos dos handles.");
   attachTip(landmarkStyleCombo, "Estilo de renderização dos marcos geométricos.");
@@ -2564,6 +2602,7 @@ function main() {
     const key = String(anchorSize) + "|" + String(handleSize);
     if (!geometryCache[key]) {
       const baseGeometry = analyzeSmartGeometry(polyCurve, anchorSize, handleSize);
+      baseGeometry.componentModel = componentModel;
       geometryCache[key] = enrichGeometryAnalysis(polyCurve, baseGeometry);
     }
     return geometryCache[key];
@@ -2661,6 +2700,28 @@ function main() {
       displayHandles = displayHandles.map(h => Object.assign({}, h, { dotRadius: baseDot }));
     }
 
+    const projectedHandles = displayHandles.map(h => {
+      const dx = h.handle.x - h.anchor.x;
+      const dy = h.handle.y - h.anchor.y;
+      const actualLength = Math.hypot(dx, dy);
+      if (actualLength <= EPS) {
+        return Object.assign({}, h, {
+          originalHandle: { x: h.handle.x, y: h.handle.y },
+          stemProjected: false
+        });
+      }
+      const ux = dx / actualLength, uy = dy / actualLength;
+      const projectedLength = actualLength * Math.max(1, stemMultiplier);
+      return Object.assign({}, h, {
+        originalHandle: { x: h.handle.x, y: h.handle.y },
+        handle: {
+          x: h.anchor.x + ux * projectedLength,
+          y: h.anchor.y + uy * projectedLength
+        },
+        stemProjected: projectedLength > actualLength + EPS
+      });
+    });
+
     // Os handles usados nas guias geométricas continuam completos. A filtragem
     // seguinte é exclusiva da camada visual de hastes e pontos de controlo.
     const handleObstacles = [];
@@ -2682,8 +2743,8 @@ function main() {
       }
     }
     const visualHandles = smartCollision
-      ? buildCollisionSafeHandles(displayHandles, handleObstacles, effectiveHandleSize, !isHandleFixed)
-      : displayHandles;
+      ? buildCollisionSafeHandles(projectedHandles, handleObstacles, effectiveHandleSize, !isHandleFixed)
+      : projectedHandles;
 
     const exactBounds = initialExactBounds || geom.bounds;
     const exactCenter = {
@@ -3030,21 +3091,31 @@ function main() {
       if (defs.length) subContainers.push({ name: "5. Inflection Points", defs: defs });
     }
 
-    // 6 & 7. Bezier Handles (Stems & Dots)
+    // 6-8. Bézier handle projection.
     if (showHandlesSwitch.value && visualHandles.length > 0) {
-      const defsStems = [], defsDots = [];
+      const defsOriginalDots = [], defsStems = [], defsDots = [];
       for (const h of visualHandles) {
-        const rawDx = h.handle.x - h.anchor.x, rawDy = h.handle.y - h.anchor.y;
-        const d = Math.hypot(rawDx, rawDy);
+        const dx = h.handle.x - h.anchor.x;
+        const dy = h.handle.y - h.anchor.y;
+        const d = Math.hypot(dx, dy);
         if (d <= EPS) continue;
 
-        const ux = rawDx / d, uy = rawDy / d;
+        const ux = dx / d, uy = dy / d;
         const dotRadius = Math.max(Number.EPSILON * 100, h.dotRadius);
-        const projectedLength = Math.max(d, d * stemMultiplier);
-        const projectedEndX = h.anchor.x + ux * projectedLength;
-        const projectedEndY = h.anchor.y + uy * projectedLength;
 
-        // Segmento principal: termina antes do círculo na posição real do handle.
+        // True Bézier point stays visible as an open ring when the main marker moves.
+        if (h.stemProjected && h.originalHandle) {
+          const actualOffset = dist(h.anchor, h.originalHandle);
+          const originalRadius = Math.max(dotRadius * 0.34, Number.EPSILON * 100);
+          if (actualOffset > originalRadius * 1.25 &&
+              dist(h.originalHandle, h.handle) > originalRadius * 1.8) {
+            defsOriginalDots.push(PolyCurveNodeDefinition.create(
+              makeSmoothCirclePoly(h.originalHandle.x, h.originalHandle.y, originalRadius),
+              noFill, stemStroke, lsdNode, noFill
+            ));
+          }
+        }
+
         if (d > dotRadius * 1.08) {
           defsStems.push(PolyCurveNodeDefinition.create(
             makeLinePoly(
@@ -3056,33 +3127,20 @@ function main() {
           ));
         }
 
-        // Projeções >1x prolongam somente a haste após o ponto; nunca deslocam
-        // o marcador da coordenada de controlo Bézier verdadeira.
-        if (projectedLength > d + dotRadius * 1.08 && d > dotRadius * 1.08) {
-          defsStems.push(PolyCurveNodeDefinition.create(
-            makeLinePoly(
-              h.handle.x + ux * dotRadius,
-              h.handle.y + uy * dotRadius,
-              projectedEndX,
-              projectedEndY
-            ),
-            noFill, stemStroke, lsdNode, noFill
-          ));
-        }
-
         defsDots.push(PolyCurveNodeDefinition.create(
           makeSmoothCirclePoly(h.handle.x, h.handle.y, dotRadius),
           dotFillDesc, dotStrokeDesc, lsdNode, noFill
         ));
       }
-      if (defsStems.length) subContainers.push({ name: "6. Handle Stems", defs: defsStems });
-      if (defsDots.length) subContainers.push({ name: "7. Handle Dots", defs: defsDots });
+      if (defsOriginalDots.length) subContainers.push({ name: "6. Original Bézier Control Positions", defs: defsOriginalDots });
+      if (defsStems.length) subContainers.push({ name: "7. Handle Stems", defs: defsStems });
+      if (defsDots.length) subContainers.push({ name: "8. Handle Dots", defs: defsDots });
     }
 
     // 8. Anchor Nodes
     if (showAnchorsSwitch.value && displayAnchors.length > 0) {
       subContainers.push({
-        name: "8. Anchor Nodes",
+        name: "9. Anchor Nodes",
         defs: displayAnchors.map(a => PolyCurveNodeDefinition.create(makeSquarePoly(a.x, a.y, a.halfSize), anchorFillDesc, anchorStrokeDesc, lsdNode, noFill))
       });
     }
