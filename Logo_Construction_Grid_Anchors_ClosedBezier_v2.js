@@ -1874,6 +1874,12 @@ function collectDirectionEvidence(polyCurve, geom) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
   const components = (geom && geom.componentModel && geom.componentModel.components) || [];
   const componentById = new Map(components.map(component => [component.id, component]));
+  const curveToComponent = new Map();
+  for (const component of components) {
+    for (let index = component.curveStart; index < component.curveStart + component.curveCount; index++) {
+      curveToComponent.set(index, component.id);
+    }
+  }
 
   function componentScale(component) {
     const bounds = component && component.bounds;
@@ -1882,11 +1888,7 @@ function collectDirectionEvidence(polyCurve, geom) {
   }
 
   function componentForCurve(curveIndex) {
-    for (const component of components) {
-      if (curveIndex >= component.curveStart &&
-          curveIndex < component.curveStart + component.curveCount) return component.id;
-    }
-    return -1;
+    return curveToComponent.has(curveIndex) ? curveToComponent.get(curveIndex) : -1;
   }
 
   for (const seg of (geom.straightSegments || [])) {
@@ -2498,7 +2500,8 @@ function enrichGeometryAnalysis(polyCurve, geom) {
       landmarks: localLandmarks,
       dominantAngle: localAngle
     };
-    const localModules = localSamples.length
+    const hasLocalAxisEvidence = localFamilies.length > 0 || localEdges.length >= 3;
+    const localModules = hasLocalAxisEvidence
       ? detectModularSystems(localGeometry, localFamilies)
       : { module: 0, phase: 0, angle: 0, ratios: [], confidence: 0, axes: [] };
     const localCircleInputs = localData.circles;
