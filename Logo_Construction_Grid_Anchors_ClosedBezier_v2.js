@@ -655,12 +655,20 @@ function buildDisplayArcCandidates(rawCandidates, bounds) {
     if (candidate.cx < bounds.x - centreMargin || candidate.cx > bounds.x + bounds.width + centreMargin ||
         candidate.cy < bounds.y - centreMargin || candidate.cy > bounds.y + bounds.height + centreMargin) continue;
 
-    const duplicate = arcs.some(existing =>
-      Math.hypot(existing.cx - candidate.cx, existing.cy - candidate.cy) <= centreTolerance &&
-      Math.abs(existing.r - candidate.r) <= Math.max(minorDimension * 0.0006, candidate.r * 0.022) &&
-      Math.abs(existing.startAngle - candidate.startAngle) <= 1.0 * DEG &&
-      Math.abs(existing.sweep - candidate.sweep) <= 1.0 * DEG
-    );
+    function angularDistance(a,b) {
+      const delta = Math.abs(((a-b) % (Math.PI*2) + Math.PI*2) % (Math.PI*2));
+      return Math.min(delta, Math.PI*2-delta);
+    }
+    const duplicate = arcs.some(existing => {
+      if (Math.hypot(existing.cx-candidate.cx, existing.cy-candidate.cy) > centreTolerance) return false;
+      if (Math.abs(existing.r-candidate.r) > Math.max(minorDimension*0.0006,candidate.r*0.022)) return false;
+      const sameDirection = angularDistance(existing.startAngle,candidate.startAngle) <= DEG &&
+        angularDistance(existing.sweep,candidate.sweep) <= DEG;
+      const reversedDirection = angularDistance(existing.startAngle,candidate.startAngle+candidate.sweep) <= DEG &&
+        angularDistance(existing.startAngle+existing.sweep,candidate.startAngle) <= DEG &&
+        Math.abs(Math.abs(existing.sweep)-Math.abs(candidate.sweep)) <= DEG;
+      return sameDirection || reversedDirection;
+    });
     if (!duplicate) arcs.push({
       cx: candidate.cx,
       cy: candidate.cy,
@@ -3092,10 +3100,15 @@ function main() {
       }
 
       const geometryDiagonal = Math.max(Number.EPSILON * 100, Math.hypot(geom.bounds.width, geom.bounds.height));
+      const geometryMinorDimension = Math.max(
+        geometryDiagonal * 0.04,
+        Math.min(Math.abs(geom.bounds.width),Math.abs(geom.bounds.height))
+      );
+      const arcCircleCentreTolerance = Math.max(geometryDiagonal * 0.0005, geometryMinorDimension * 0.0045 * 1.8);
       for (const circle of visibleCircles) {
         const representedByArc = visibleArcs.some(arc =>
-          Math.hypot(arc.cx - circle.cx, arc.cy - circle.cy) <= Math.max(geometryDiagonal * 0.0015, circle.r * 0.025) &&
-          Math.abs(arc.r - circle.r) <= Math.max(geometryDiagonal * 0.0006, circle.r * 0.022)
+          Math.hypot(arc.cx - circle.cx, arc.cy - circle.cy) <= arcCircleCentreTolerance &&
+          Math.abs(arc.r - circle.r) <= Math.max(geometryMinorDimension * 0.0006, circle.r * 0.022)
         );
         if (!representedByArc) {
           defsArcs.push(PolyCurveNodeDefinition.create(
