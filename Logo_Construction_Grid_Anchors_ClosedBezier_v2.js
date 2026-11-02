@@ -1093,7 +1093,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
   // Círculos de Bézier analíticos
   const uniqueCircles = [];
   for (const c of rawCircles) {
-    const match = uniqueCircles.find(ex => dist(ex, c) < Math.max(3.0, c.r * 0.04) && Math.abs(ex.r - c.r) < Math.max(2.5, c.r * 0.035));
+    const match = uniqueCircles.find(ex => dist(ex, c) < Math.max(objectScaleContext.diagonal * 0.001, c.r * 0.04) && Math.abs(ex.r - c.r) < Math.max(objectScaleContext.diagonal * 0.0008, c.r * 0.035));
     if (!match) {
       uniqueCircles.push({ cx: c.cx, cy: c.cy, r: c.r, confidence: c.confidence });
     }
@@ -1178,10 +1178,10 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
   const sortedAnchors = uniqueAnchors.slice().sort((a, b) => b.importance - a.importance);
 
   const baseHalf = baseAnchorSize / 2;
-  const nearestAnchorDistances = calculateNearestDistances(sortedAnchors, Math.max(1, baseAnchorSize * 2.4));
+  const nearestAnchorDistances = calculateNearestDistances(sortedAnchors, Math.max(Number.EPSILON * 100, baseAnchorSize * 2.4));
   const adaptiveAnchors = sortedAnchors.map((a, i) => {
     const nearest = nearestAnchorDistances[i];
-    const halfSize = nearest < baseAnchorSize * 2.4 ? Math.max(1.0, Math.min(baseHalf, nearest * 0.32)) : baseHalf;
+    const halfSize = nearest < baseAnchorSize * 2.4 ? Math.max(baseHalf * 0.12, Math.min(baseHalf, nearest * 0.32)) : baseHalf;
     return Object.assign({}, a, { halfSize: halfSize, clearance: nearest, priority: a.importance });
   });
 
@@ -1198,7 +1198,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize) {
     const localClearance = Math.min(nearestOther, dist(h.handle, parent));
     // Amortecimento mais forte em áreas densas. A filtragem visual posterior
     // decide se um marcador deve ser ocultado quando nem o tamanho mínimo cabe.
-    const minDotR = Math.max(0.8, Math.min(1.2, baseDotR * 0.25));
+    const minDotR = Math.max(Number.EPSILON * 100, baseDotR * 0.25);
     const calculatedDotR = localClearance < baseHandleSize * 2.2
       ? Math.max(minDotR, Math.min(baseDotR, localClearance * 0.22))
       : baseDotR;
