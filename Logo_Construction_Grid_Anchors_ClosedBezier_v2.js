@@ -655,7 +655,7 @@ function buildDisplayArcCandidates(rawCandidates, bounds) {
         candidate.cy < bounds.y - centreMargin || candidate.cy > bounds.y + bounds.height + centreMargin) continue;
 
     const duplicate = arcs.some(existing =>
-      dist(existing, candidate) <= centreTolerance &&
+      Math.hypot(existing.cx - candidate.cx, existing.cy - candidate.cy) <= centreTolerance &&
       Math.abs(existing.r - candidate.r) <= Math.max(diagonal * 0.0006, candidate.r * 0.022) &&
       Math.abs(existing.startAngle - candidate.startAngle) <= 1.0 * DEG &&
       Math.abs(existing.sweep - candidate.sweep) <= 1.0 * DEG
@@ -2437,6 +2437,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
   geom.displayCircles = circleAnalysis.circles;
+  geom.displayArcs = buildDisplayArcCandidates(geom.rawCircleCandidates || [], geom.bounds);
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
@@ -3066,13 +3067,30 @@ function main() {
     }
 
     // 2. Curvature Arcs & Rings
-    const visibleCircles = geom.displayCircles || geom.circles;
-    if (showCirclesSwitch.value && visibleCircles.length > 0) {
+    const visibleCircles = geom.displayCircles || geom.circles || [];
+    const visibleArcs = geom.displayArcs || [];
+    if (showCirclesSwitch.value && (visibleArcs.length > 0 || visibleCircles.length > 0)) {
       const defsArcs = [];
-      for (const c of visibleCircles) {
-        defsArcs.push(PolyCurveNodeDefinition.create(makeSmoothCirclePoly(c.cx, c.cy, c.r), noFill, outlineStroke, lsdOutline, noFill));
+      for (const arc of visibleArcs) {
+        const arcPoly = makeCircularArcPoly(arc.cx, arc.cy, arc.r, arc.startAngle, arc.sweep);
+        if (!arcPoly) continue;
+        defsArcs.push(PolyCurveNodeDefinition.create(arcPoly, noFill, outlineStroke, lsdOutline, noFill));
       }
-      subContainers.push({ name: "2. Curvature Arcs & Rings", defs: defsArcs });
+
+      const geometryDiagonal = Math.max(Number.EPSILON * 100, Math.hypot(geom.bounds.width, geom.bounds.height));
+      for (const circle of visibleCircles) {
+        const representedByArc = visibleArcs.some(arc =>
+          Math.hypot(arc.cx - circle.cx, arc.cy - circle.cy) <= Math.max(geometryDiagonal * 0.0015, circle.r * 0.025) &&
+          Math.abs(arc.r - circle.r) <= Math.max(geometryDiagonal * 0.0006, circle.r * 0.022)
+        );
+        if (!representedByArc) {
+          defsArcs.push(PolyCurveNodeDefinition.create(
+            makeSmoothCirclePoly(circle.cx, circle.cy, circle.r),
+            noFill, outlineStroke, lsdOutline, noFill
+          ));
+        }
+      }
+      if (defsArcs.length) subContainers.push({ name: "2. Curvature Arcs & Rings", defs: defsArcs });
     }
 
     // 3. Construction Gridlines
