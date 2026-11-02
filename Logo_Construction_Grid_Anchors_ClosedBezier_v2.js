@@ -1661,14 +1661,12 @@ function projectHandlePositions(handles, multiplier) {
     const dx = h.handle.x - h.anchor.x;
     const dy = h.handle.y - h.anchor.y;
     const actualLength = Math.hypot(dx, dy);
-    const originalHandle = { x: h.handle.x, y: h.handle.y };
     if (actualLength <= EPS || factor <= 1 + 1e-9) {
-      return Object.assign({}, h, { originalHandle, stemProjected: false });
+      return Object.assign({}, h, { stemProjected: false });
     }
     const ux = dx / actualLength, uy = dy / actualLength;
     const projectedLength = actualLength * factor;
     return Object.assign({}, h, {
-      originalHandle,
       handle: { x: h.anchor.x + ux * projectedLength, y: h.anchor.y + uy * projectedLength },
       stemProjected: true
     });
@@ -2643,7 +2641,7 @@ function main() {
   attachTip(landmarkSizeCtrl, "Diâmetro dos marcadores de extremos e eventos de curva.");
   attachTip(scaleMarkersSwitch, "Quando activo, os tamanhos dos marcadores, as distâncias de colisão, a tolerância de fusão e a margem da grelha acompanham a dimensão do objecto. Os valores dos controlos são referências para uma geometria de 600 × 600 unidades de coordenadas.");
   attachTip(handleScalingCombo, "'Automatic' reduz pontos em zonas densas e oculta os que colidiriam; 'Fixed' mantém o diâmetro, com filtragem dos conflitos inevitáveis.");
-  attachTip(stemScaleCombo, "Nos valores acima de 1x, a haste e o marcador principal são projectados juntos para a nova extremidade. Um pequeno anel vazado mantém visível a posição Bézier real do ponto de controlo.");
+  attachTip(stemScaleCombo, "Nos valores acima de 1x, a haste e o marcador principal são projectados juntos para a nova extremidade. A geometria Bézier original não é alterada.");
   attachTip(anchorStyleCombo, "Estilo de renderização dos nós das âncoras.");
   attachTip(handleStyleCombo, "Estilo de renderização dos círculos dos handles.");
   attachTip(landmarkStyleCombo, "Estilo de renderização dos marcos geométricos.");
@@ -3152,7 +3150,7 @@ function main() {
 
     // 6-8. Bézier handle projection.
     if (showHandlesSwitch.value && visualHandles.length > 0) {
-      const defsOriginalDots = [], defsStems = [], defsDots = [];
+      const defsStems = [], defsDots = [];
       for (const h of visualHandles) {
         const dx = h.handle.x - h.anchor.x;
         const dy = h.handle.y - h.anchor.y;
@@ -3161,19 +3159,6 @@ function main() {
 
         const ux = dx / d, uy = dy / d;
         const dotRadius = Math.max(Number.EPSILON * 100, h.dotRadius);
-
-        // True Bézier point stays visible as an open ring when the main marker moves.
-        if (h.stemProjected && h.originalHandle) {
-          const actualOffset = dist(h.anchor, h.originalHandle);
-          const originalRadius = Math.max(dotRadius * 0.34, Number.EPSILON * 100);
-          if (actualOffset > originalRadius * 1.25 &&
-              dist(h.originalHandle, h.handle) > originalRadius * 1.8) {
-            defsOriginalDots.push(PolyCurveNodeDefinition.create(
-              makeSmoothCirclePoly(h.originalHandle.x, h.originalHandle.y, originalRadius),
-              noFill, stemStroke, lsdNode, noFill
-            ));
-          }
-        }
 
         if (d > dotRadius * 1.08) {
           defsStems.push(PolyCurveNodeDefinition.create(
@@ -3191,15 +3176,14 @@ function main() {
           dotFillDesc, dotStrokeDesc, lsdNode, noFill
         ));
       }
-      if (defsOriginalDots.length) subContainers.push({ name: "6. Original Bézier Control Positions", defs: defsOriginalDots });
-      if (defsStems.length) subContainers.push({ name: "7. Handle Stems", defs: defsStems });
-      if (defsDots.length) subContainers.push({ name: "8. Handle Dots", defs: defsDots });
+      if (defsStems.length) subContainers.push({ name: "6. Handle Stems", defs: defsStems });
+      if (defsDots.length) subContainers.push({ name: "7. Handle Dots", defs: defsDots });
     }
 
     // 8. Anchor Nodes
     if (showAnchorsSwitch.value && displayAnchors.length > 0) {
       subContainers.push({
-        name: "9. Anchor Nodes",
+        name: "8. Anchor Nodes",
         defs: displayAnchors.map(a => PolyCurveNodeDefinition.create(makeSquarePoly(a.x, a.y, a.halfSize), anchorFillDesc, anchorStrokeDesc, lsdNode, noFill))
       });
     }
