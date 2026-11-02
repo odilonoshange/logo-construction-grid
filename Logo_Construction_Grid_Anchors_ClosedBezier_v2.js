@@ -486,7 +486,7 @@ function isCurveClosed(curve, beziers) {
 }
 
 function calculateNearestDistances(points, searchRadius) {
-  const cellSize = Math.max(0.25, searchRadius || 1);
+  const cellSize = Math.max(Number.EPSILON * 100, searchRadius || 1);
   const buckets = new Map();
   const keys = points.map(p => ({ x: Math.floor(p.x / cellSize), y: Math.floor(p.y / cellSize) }));
   for (let i = 0; i < points.length; i++) {
@@ -519,15 +519,15 @@ function fitCircleToBezier(b) {
   const chord = dist(b.start, b.end);
   const controlSpan = Math.max(dist(b.start, b.c1), dist(b.c1, b.c2), dist(b.c2, b.end));
   const closedCubic = chord <= Math.max(1e-8, controlSpan * 1e-6);
-  if (!closedCubic && chord < 1.0) return null;
-  if (closedCubic && controlSpan < 2.5) return null;
+  if (!closedCubic && chord < controlSpan * 0.002) return null;
+  if (closedCubic && controlSpan <= Number.EPSILON) return null;
 
   if (!closedCubic) {
     const dx = b.end.x - b.start.x, dy = b.end.y - b.start.y;
     const invChord = 1.0 / chord;
     const h1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * invChord;
     const h2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * invChord;
-    if (h1 < 0.45 && h2 < 0.45) return null;
+    if (h1 < controlSpan * 0.0007 && h2 < controlSpan * 0.0007) return null;
   }
 
   const N = 7;
@@ -552,7 +552,8 @@ function fitCircleToBezier(b) {
   }
 
   const det = Suu * Svv - Suv * Suv;
-  if (Math.abs(det) < 1e-4) return null;
+  const momentScale = Math.max(Number.MIN_VALUE, (Suu + Svv) * (Suu + Svv));
+  if (Math.abs(det) < momentScale * 1e-10) return null;
 
   const rhs1 = 0.5 * (Suuu + Suvv);
   const rhs2 = 0.5 * (Svvv + Svuu);
@@ -561,14 +562,14 @@ function fitCircleToBezier(b) {
   const cx = uc + mx, cy = vc + my;
   const r = Math.sqrt(uc * uc + vc * vc + (Suu + Svv) / N);
 
-  if (!isFinite(r) || r < 2.5 || r > 8000.0) return null;
+  if (!isFinite(r) || r < controlSpan * 0.001) return null;
 
   let maxDev = 0;
   for (let i = 0; i < N; i++) {
     const d = Math.abs(dist(pts[i], { x: cx, y: cy }) - r);
     if (d > maxDev) maxDev = d;
   }
-  const allowedDev = Math.max(0.65, r * 0.022);
+  const allowedDev = Math.max(controlSpan * 1e-5, r * 0.022);
   if (maxDev > allowedDev) return null;
 
   return { cx, cy, r, confidence: 1 - (maxDev / allowedDev) };
@@ -700,7 +701,7 @@ function detectAxisSymmetry(anchors, angle) {
   const uMin = Math.min.apply(null, points.map(p => p.u)), uMax = Math.max.apply(null, points.map(p => p.u));
   const vMin = Math.min.apply(null, points.map(p => p.v)), vMax = Math.max.apply(null, points.map(p => p.v));
   const uMid = (uMin + uMax) / 2, vMid = (vMin + vMax) / 2;
-  const scale = Math.max(1, Math.min(uMax - uMin, vMax - vMin));
+  const scale = Math.max(Number.EPSILON * 100, Math.min(uMax - uMin, vMax - vMin));
 
   function mirrorScore(useU) {
     let matched = 0;
@@ -708,7 +709,7 @@ function detectAxisSymmetry(anchors, angle) {
       const target = useU ? { u: 2 * uMid - p.u, v: p.v } : { u: p.u, v: 2 * vMid - p.v };
       let best = Infinity;
       for (const q of points) best = Math.min(best, Math.hypot(target.u - q.u, target.v - q.v));
-      if (best <= Math.max(2.0, scale * 0.03)) matched++;
+      if (best <= scale * 0.03) matched++;
     }
     return matched / points.length;
   }
@@ -1253,9 +1254,9 @@ function lineSignedNormalOffset(line, angle) {
 function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
   const result = [];
   const span = referenceBounds
-    ? Math.max(1, Math.hypot(referenceBounds.width, referenceBounds.height))
+    ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
-  const positionTolerance = Math.max(0.5, Number(mergeDist) || 1);
+  const positionTolerance = Math.max(span * 1e-6, Number(mergeDist) || 0);
   // Angular tolerance tightens for large marks, so slightly different diagonals
   // are not collapsed just because they are close near the origin.
   const angleTolerance = Math.max(0.06 * DEG, Math.min(0.45 * DEG, Math.atan2(positionTolerance * 0.35, span)));
@@ -1330,7 +1331,11 @@ function buildCollisionSafeLines(lines, features, mergeDist, referenceBounds) {
     let support = 0;
     for (const p of supportPoints) {
       const d = Math.abs(p.x * nx + p.y * ny - offset);
-      if (d <= Math.max(1.5, positionlessTolerance(mergeDist) * 0.18)) support++;
+      const supportTolerance = Math.max(
+        Math.hypot(referenceBounds && referenceBounds.width || 0, referenceBounds && referenceBounds.height || 0) * 0.0015,
+        positionlessTolerance(mergeDist) * 0.18
+      );
+      if (d <= supportTolerance) support++;
     }
     line.support = Math.max(line.support || 0, support);
     line._rank = (line.importance || 0) + Math.min(24, line.support * 2.5);
@@ -1342,7 +1347,7 @@ function buildCollisionSafeLines(lines, features, mergeDist, referenceBounds) {
 }
 
 function positionlessTolerance(value) {
-  return Math.max(0.5, Number(value) || 1);
+  return Math.max(Number.EPSILON * 100, Number(value) || 0);
 }
 
 function detectDominantDirectionPrecise(segments, fallbackAngle) {
@@ -1525,9 +1530,9 @@ function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves
 function buildCollisionSafeHandles(handles, anchors, baseHandleSize, allowScaling) {
   if (!handles || handles.length === 0) return [];
 
-  const baseRadius = Math.max(0.5, baseHandleSize / 2);
-  const minRadius = Math.max(0.8, Math.min(1.15, baseRadius * 0.25));
-  const clearanceGap = 0.75;
+  const baseRadius = Math.max(Number.EPSILON * 100, baseHandleSize / 2);
+  const minRadius = baseRadius * 0.22;
+  const clearanceGap = baseRadius * 0.18;
 
   const candidates = handles.map((h, index) => {
     let nearestHandle = Infinity;
@@ -1626,8 +1631,8 @@ function collectDirectionEvidence(polyCurve, geom) {
   let curveWeight = 0;
   let primitiveId = 0;
   const bounds = geom && geom.bounds ? geom.bounds : { width: 100, height: 100 };
-  const diagonal = Math.max(1, Math.hypot(bounds.width, bounds.height));
-  const minUsefulLength = Math.max(0.5, diagonal * 0.002);
+  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
+  const minUsefulLength = diagonal * 0.002;
 
   // Straight vector edges retain their true length and direction.
   for (const seg of (geom.straightSegments || [])) {
@@ -1800,19 +1805,19 @@ function mergeProjectedPositions(points, angle, tolerance) {
 }
 
 function evaluateProjectedModule(points, bounds, angle, directionWeight) {
-  const diagonal = Math.max(1, Math.hypot(bounds.width, bounds.height));
-  const tolerance = Math.max(0.65, Math.min(2.2, diagonal * 0.0022));
+  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
+  const tolerance = diagonal * 0.0022;
   const positions = mergeProjectedPositions(points, angle, tolerance);
   if (positions.length < 5) return null;
 
   const gaps = [];
   for (let i = 1; i < positions.length; i++) {
     const gap = positions[i].mean - positions[i - 1].mean;
-    if (gap >= Math.max(2.8, diagonal * 0.008) && gap <= diagonal * 0.55) gaps.push(gap);
+    if (gap >= diagonal * 0.008 && gap <= diagonal * 0.55) gaps.push(gap);
   }
   if (gaps.length < 3) return null;
 
-  const minUnit = Math.max(3.2, diagonal * 0.009);
+  const minUnit = diagonal * 0.009;
   const maxUnit = diagonal * 0.36;
   const rawCandidates = [];
   for (const gap of gaps) {
@@ -1934,67 +1939,78 @@ function evaluateProjectedModule(points, bounds, angle, directionWeight) {
 }
 
 function detectModularSystems(geom, directionFamilies) {
-  const bounds = geom.bounds;
-  const points = [];
-  const seen = [];
-  function addPoint(p) {
-    if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
-    if (seen.some(q => dist(q, p) < 0.45)) return;
-    seen.push(p);
-    points.push({ x: p.x, y: p.y });
+  const bounds=geom.bounds;
+  const diagonal=Math.max(Number.EPSILON*100,Math.hypot(bounds.width,bounds.height));
+  const dedupeTolerance=diagonal*1e-5;
+  const raw=[];
+  for(const a of (geom.anchors||[]))if(a&&Number.isFinite(a.x)&&Number.isFinite(a.y))
+    raw.push({x:a.x,y:a.y,importance:Number(a.importance||a.priority||30)});
+  for(const l of (geom.landmarks||[]))if(l&&Number.isFinite(l.x)&&Number.isFinite(l.y))
+    raw.push({x:l.x,y:l.y,importance:Number(l.importance||45)});
+  raw.sort((a,b)=>b.importance-a.importance);
+  const points=[],buckets=new Map(),cell=Math.max(dedupeTolerance,Number.EPSILON*100);
+  const key=(x,y)=>x+","+y;
+  for(const p of raw){
+    const gx=Math.floor(p.x/cell),gy=Math.floor(p.y/cell);let duplicate=false;
+    for(let dx=-1;dx<=1&&!duplicate;dx++)for(let dy=-1;dy<=1&&!duplicate;dy++){
+      const bucket=buckets.get(key(gx+dx,gy+dy));
+      if(bucket&&bucket.some(q=>dist(q,p)<=dedupeTolerance))duplicate=true;
+    }
+    if(duplicate)continue;
+    const item={x:p.x,y:p.y,importance:p.importance};points.push(item);
+    const k=key(gx,gy);if(!buckets.has(k))buckets.set(k,[]);buckets.get(k).push(item);
   }
-  for (const a of (geom.anchors || [])) addPoint(a);
-  for (const l of (geom.landmarks || [])) addPoint(l);
-  if (points.length > 180) {
-    // Preserve structural points first; avoid unbounded O(n log n) candidate work.
-    points.length = 180;
+  const maxPoints=220;let analysisPoints=points;
+  if(points.length>maxPoints){
+    // Farthest-point sampling preserves coverage across separate glyphs and contours.
+    const selected=[points[0]],chosen=new Set([0]);
+    const nearest=points.map((p,i)=>i===0?0:dist(p,selected[0]));
+    while(selected.length<maxPoints){
+      let bestIndex=-1,bestScore=-Infinity;
+      for(let i=0;i<points.length;i++){
+        if(chosen.has(i))continue;
+        const score=nearest[i]*(1+clamp(points[i].importance,0,100)/100*0.12);
+        if(score>bestScore){bestScore=score;bestIndex=i;}
+      }
+      if(bestIndex<0)break;chosen.add(bestIndex);selected.push(points[bestIndex]);
+      const picked=points[bestIndex];
+      for(let i=0;i<points.length;i++)if(!chosen.has(i)){
+        const d=dist(points[i],picked);if(d<nearest[i])nearest[i]=d;
+      }
+    }
+    analysisPoints=selected;
   }
-  if (points.length < 4) return { module: 0, phase: 0, angle: 0, ratios: [], confidence: 0, axes: [] };
-
-  const axesToTest = [];
-  function addAxis(angle, weight, source) {
-    const a = canonicalLineAngle(angle);
-    if (axesToTest.some(x => lineAngleDiff(x.angle, a) < 2.0 * DEG)) return;
-    axesToTest.push({ angle: a, weight: weight || 0, source: source || 'direction-family' });
+  if(analysisPoints.length<4)return{module:0,phase:0,angle:0,ratios:[],confidence:0,axes:[]};
+  const axesToTest=[];
+  function addAxis(angle,weight,source){
+    const a=canonicalLineAngle(angle);
+    if(axesToTest.some(x=>lineAngleDiff(x.angle,a)<2*DEG))return;
+    axesToTest.push({angle:a,weight:weight||0,source:source||"direction-family"});
   }
-  for (const family of (directionFamilies || []).slice(0, 4)) {
-    addAxis(family.angle, family.weight, 'family');
-    addAxis(family.angle + Math.PI / 2, family.weight * 0.88, 'perpendicular');
+  for(const family of(directionFamilies||[]).slice(0,4)){
+    addAxis(family.angle,family.weight,"family");addAxis(family.angle+Math.PI/2,family.weight*0.88,"perpendicular");
   }
-  if (!axesToTest.length) {
-    const fallback = geom.dominantAngle || 0;
-    addAxis(fallback, 0, 'fallback');
-    addAxis(fallback + Math.PI / 2, 0, 'fallback-perpendicular');
+  if(!axesToTest.length){
+    const fallback=geom.dominantAngle||0;addAxis(fallback,0,"fallback");addAxis(fallback+Math.PI/2,0,"fallback-perpendicular");
   }
-
-  const results = [];
-  for (const axis of axesToTest.slice(0, 8)) {
-    const result = evaluateProjectedModule(points, bounds, axis.angle, axis.weight);
-    if (!result) continue;
-    result.source = axis.source;
-    results.push(result);
+  const results=[];
+  for(const axis of axesToTest.slice(0,8)){
+    const result=evaluateProjectedModule(analysisPoints,bounds,axis.angle,axis.weight);
+    if(!result)continue;result.source=axis.source;results.push(result);
   }
-  results.sort((a, b) => b.score - a.score);
-
-  const selected = [];
-  for (const candidate of results) {
-    const duplicate = selected.some(existing =>
-      lineAngleDiff(existing.angle, candidate.angle) < 2.0 * DEG &&
-      Math.abs(existing.module - candidate.module) <= Math.max(1.2, candidate.module * 0.035)
+  results.sort((a,b)=>b.score-a.score);const selected=[];
+  for(const candidate of results){
+    const duplicate=selected.some(existing=>
+      lineAngleDiff(existing.angle,candidate.angle)<2*DEG&&
+      Math.abs(existing.module-candidate.module)<=Math.max(diagonal*0.0012,candidate.module*0.035)
     );
-    if (duplicate) continue;
-    selected.push(candidate);
-    if (selected.length >= 4) break;
+    if(duplicate)continue;selected.push(candidate);if(selected.length>=4)break;
   }
-  const primary = selected[0] || null;
-  return {
-    module: primary ? primary.module : 0,
-    phase: primary ? primary.phase : 0,
-    angle: primary ? primary.angle : 0,
-    ratios: primary ? primary.ratios : [],
-    confidence: primary ? primary.confidence : 0,
-    axes: selected,
-    pointCount: points.length
+  const primary=selected[0]||null;
+  return{
+    module:primary?primary.module:0,phase:primary?primary.phase:0,angle:primary?primary.angle:0,
+    ratios:primary?primary.ratios:[],confidence:primary?primary.confidence:0,
+    axes:selected,pointCount:analysisPoints.length,sourcePointCount:points.length
   };
 }
 
@@ -2016,10 +2032,10 @@ function approximateSmallRatio(value, maxTerm) {
 }
 
 function refineCircleCandidates(rawCircles, bounds) {
-  const diagonal = Math.max(1, Math.hypot(bounds.width, bounds.height));
-  const minRadius = Math.max(2.5, diagonal * 0.0035);
+  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
+  const minRadius = diagonal * 0.0035;
   const maxRadius = diagonal * 2.25;
-  const centreTolerance = Math.max(1.5, diagonal * 0.0045);
+  const centreTolerance = diagonal * 0.0045;
   const unique = [];
 
   for (const input of (rawCircles || [])) {
@@ -2033,7 +2049,7 @@ function refineCircleCandidates(rawCircles, bounds) {
 
     const existing = unique.find(c =>
       Math.hypot(c.cx - input.cx, c.cy - input.cy) <= centreTolerance &&
-      Math.abs(c.r - input.r) <= Math.max(1.2, input.r * 0.022)
+      Math.abs(c.r - input.r) <= Math.max(diagonal * 0.0006, input.r * 0.022)
     );
     if (existing) {
       const total = existing.weight + confidence;
