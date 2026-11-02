@@ -636,7 +636,7 @@ function fitCircleToBezier(b) {
   };
 }
 
-function buildDisplayArcCandidates(rawCandidates, bounds) {
+function buildDisplayArcCandidates(rawCandidates, bounds, circleFamilies) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
   const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
   const minRadius = minorDimension * 0.0035;
@@ -659,9 +659,23 @@ function buildDisplayArcCandidates(rawCandidates, bounds) {
       const delta = Math.abs(((a-b) % (Math.PI*2) + Math.PI*2) % (Math.PI*2));
       return Math.min(delta, Math.PI*2-delta);
     }
+    let fittedCircle = null;
+    for (const family of (circleFamilies || [])) {
+      const centreDistance = Math.hypot(family.cx - candidate.cx, family.cy - candidate.cy);
+      if (centreDistance > centreTolerance * 1.8) continue;
+      const tier = (family.circles || []).find(circle =>
+        Math.abs(circle.r - candidate.r) <= Math.max(minorDimension * 0.0006, candidate.r * 0.022)
+      );
+      if (tier) {
+        fittedCircle = { cx: family.cx, cy: family.cy, r: tier.r };
+        break;
+      }
+    }
+    const arcGeometry = fittedCircle || { cx: candidate.cx, cy: candidate.cy, r: candidate.r };
+
     const duplicate = arcs.some(existing => {
-      if (Math.hypot(existing.cx-candidate.cx, existing.cy-candidate.cy) > centreTolerance) return false;
-      if (Math.abs(existing.r-candidate.r) > Math.max(minorDimension*0.0006,candidate.r*0.022)) return false;
+      if (Math.hypot(existing.cx-arcGeometry.cx, existing.cy-arcGeometry.cy) > centreTolerance) return false;
+      if (Math.abs(existing.r-arcGeometry.r) > Math.max(minorDimension*0.0006,arcGeometry.r*0.022)) return false;
       const sameDirection = angularDistance(existing.startAngle,candidate.startAngle) <= DEG &&
         angularDistance(existing.sweep,candidate.sweep) <= DEG;
       const reversedDirection = angularDistance(existing.startAngle,candidate.startAngle+candidate.sweep) <= DEG &&
@@ -670,9 +684,9 @@ function buildDisplayArcCandidates(rawCandidates, bounds) {
       return sameDirection || reversedDirection;
     });
     if (!duplicate) arcs.push({
-      cx: candidate.cx,
-      cy: candidate.cy,
-      r: candidate.r,
+      cx: arcGeometry.cx,
+      cy: arcGeometry.cy,
+      r: arcGeometry.r,
       startAngle: candidate.startAngle,
       sweep: candidate.sweep,
       confidence: candidate.confidence,
@@ -2458,7 +2472,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
   geom.displayCircles = circleAnalysis.circles;
-  geom.displayArcs = buildDisplayArcCandidates(geom.rawCircleCandidates || [], geom.bounds);
+  geom.displayArcs = buildDisplayArcCandidates(geom.rawCircleCandidates || [], geom.bounds, circleAnalysis.families);
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
