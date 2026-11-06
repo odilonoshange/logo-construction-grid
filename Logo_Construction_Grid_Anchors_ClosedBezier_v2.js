@@ -2370,7 +2370,6 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.directionFamilies = families;
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
-  geom.displayCircles = circleAnalysis.circles;
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
