@@ -562,18 +562,13 @@ function calculateNearestDistances(points, searchRadius) {
 
 function fitCircleToBezier(b) {
   const chord = dist(b.start, b.end);
-  const controlSpan = Math.max(dist(b.start, b.c1), dist(b.c1, b.c2), dist(b.c2, b.end));
-  const closedCubic = chord <= Math.max(1e-8, controlSpan * 1e-6);
-  if (!closedCubic && chord < controlSpan * 0.002) return null;
-  if (closedCubic && controlSpan <= Number.EPSILON) return null;
+  if (chord < 1.0) return null;
 
-  if (!closedCubic) {
-    const dx = b.end.x - b.start.x, dy = b.end.y - b.start.y;
-    const invChord = 1.0 / chord;
-    const h1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * invChord;
-    const h2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * invChord;
-    if (h1 < controlSpan * 0.0007 && h2 < controlSpan * 0.0007) return null;
-  }
+  const dx = b.end.x - b.start.x, dy = b.end.y - b.start.y;
+  const invChord = 1.0 / chord;
+  const h1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * invChord;
+  const h2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * invChord;
+  if (h1 < 0.45 && h2 < 0.45) return null;
 
   const N = 7;
   const pts = [];
@@ -597,8 +592,7 @@ function fitCircleToBezier(b) {
   }
 
   const det = Suu * Svv - Suv * Suv;
-  const momentScale = Math.max(Number.MIN_VALUE, (Suu + Svv) * (Suu + Svv));
-  if (Math.abs(det) < momentScale * 1e-10) return null;
+  if (Math.abs(det) < 1e-4) return null;
 
   const rhs1 = 0.5 * (Suuu + Suvv);
   const rhs2 = 0.5 * (Svvv + Svuu);
@@ -607,163 +601,17 @@ function fitCircleToBezier(b) {
   const cx = uc + mx, cy = vc + my;
   const r = Math.sqrt(uc * uc + vc * vc + (Suu + Svv) / N);
 
-  if (!isFinite(r) || r < controlSpan * 0.001) return null;
+  if (!isFinite(r) || r < 2.5 || r > 8000.0) return null;
 
   let maxDev = 0;
   for (let i = 0; i < N; i++) {
     const d = Math.abs(dist(pts[i], { x: cx, y: cy }) - r);
     if (d > maxDev) maxDev = d;
   }
-  const allowedDev = Math.max(controlSpan * 1e-5, r * 0.022);
+  const allowedDev = Math.max(0.65, r * 0.022);
   if (maxDev > allowedDev) return null;
 
-  const startAngle = Math.atan2(b.start.y - cy, b.start.x - cx);
-  const endAngle = Math.atan2(b.end.y - cy, b.end.x - cx);
-  const midpoint = cubicPoint(b, 0.5);
-  const tangent = bezierDerivative(b, 0.5);
-  const orientation = cross(midpoint.x - cx, midpoint.y - cy, tangent.x, tangent.y);
-  const tau = Math.PI * 2;
-  const positiveSweep = ((endAngle - startAngle) % tau + tau) % tau;
-  let sweep = orientation >= 0 ? positiveSweep : positiveSweep - tau;
-  if (Math.abs(sweep) <= 1e-7 && closedCubic) sweep = orientation >= 0 ? tau : -tau;
-  if (!Number.isFinite(sweep) || Math.abs(sweep) <= 1e-7) return null;
-
-  return {
-    cx, cy, r,
-    confidence: 1 - (maxDev / allowedDev),
-    startAngle,
-    sweep
-  };
-}
-
-function splitBezierAtHalf(b) {
-  const midpoint = (a, c) => ({ x: (a.x + c.x) * 0.5, y: (a.y + c.y) * 0.5 });
-  const p01 = midpoint(b.start, b.c1);
-  const p12 = midpoint(b.c1, b.c2);
-  const p23 = midpoint(b.c2, b.end);
-  const p012 = midpoint(p01, p12);
-  const p123 = midpoint(p12, p23);
-  const p = midpoint(p012, p123);
-
-  return [
-    { start: b.start, c1: p01, c2: p012, end: p },
-    { start: p, c1: p123, c2: p23, end: b.end }
-  ];
-}
-
-// A Bézier may contain a useful circular portion without being circular as a
-// whole. Try the complete segment first, then progressively fit local spans.
-function collectCircularArcFits(bezier, componentId, output, depth) {
-  const level = Number.isFinite(depth) ? depth : 0;
-  const candidate = fitCircleToBezier(bezier);
-  const minimumSweep = 6 * DEG;
-
-  if (candidate && candidate.confidence >= 0.16) {
-    const sweep = Math.abs(candidate.sweep);
-    if (sweep >= minimumSweep && sweep <= Math.PI * 2 + 1e-5) {
-      candidate.componentId = componentId;
-      output.push(candidate);
-      return;
-    }
-    // Subdividing an almost straight span only makes its angular sweep smaller.
-    if (sweep < minimumSweep) return;
-  }
-
-  if (level >= 3) return;
-  const halves = splitBezierAtHalf(bezier);
-  collectCircularArcFits(halves[0], componentId, output, level + 1);
-  collectCircularArcFits(halves[1], componentId, output, level + 1);
-}
-
-function buildDisplayArcCandidates(rawCandidates, bounds, circleFamilies) {
-  const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
-  const minRadius = minorDimension * 0.0035;
-  const maxRadius = diagonal * 2.25;
-  const centreMargin = diagonal * 1.25;
-  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0005);
-  const arcs = [];
-
-  for (const candidate of (rawCandidates || [])) {
-    if (!candidate || !Number.isFinite(candidate.cx) || !Number.isFinite(candidate.cy) ||
-        !Number.isFinite(candidate.r) || !Number.isFinite(candidate.startAngle) ||
-        !Number.isFinite(candidate.sweep)) continue;
-    if (candidate.r < minRadius || candidate.r > maxRadius) continue;
-    if (Math.abs(candidate.sweep) <= 1e-5 || Math.abs(candidate.sweep) > Math.PI * 2 + 1e-5) continue;
-    if ((candidate.confidence || 0) < 0.16) continue;
-    if (candidate.cx < bounds.x - centreMargin || candidate.cx > bounds.x + bounds.width + centreMargin ||
-        candidate.cy < bounds.y - centreMargin || candidate.cy > bounds.y + bounds.height + centreMargin) continue;
-
-    function angularDistance(a,b) {
-      const delta = Math.abs(((a-b) % (Math.PI*2) + Math.PI*2) % (Math.PI*2));
-      return Math.min(delta, Math.PI*2-delta);
-    }
-    let fittedCircle = null;
-    for (const family of (circleFamilies || [])) {
-      const centreDistance = Math.hypot(family.cx - candidate.cx, family.cy - candidate.cy);
-      if (centreDistance > centreTolerance * 1.8) continue;
-      const tier = (family.circles || []).find(circle =>
-        Math.abs(circle.r - candidate.r) <= Math.max(minorDimension * 0.0006, candidate.r * 0.022)
-      );
-      if (tier) {
-        fittedCircle = { cx: family.cx, cy: family.cy, r: tier.r };
-        break;
-      }
-    }
-    const arcGeometry = fittedCircle || { cx: candidate.cx, cy: candidate.cy, r: candidate.r };
-
-    const duplicate = arcs.some(existing => {
-      if (Math.hypot(existing.cx-arcGeometry.cx, existing.cy-arcGeometry.cy) > centreTolerance) return false;
-      if (Math.abs(existing.r-arcGeometry.r) > Math.max(minorDimension*0.0006,arcGeometry.r*0.022)) return false;
-      const sameDirection = angularDistance(existing.startAngle,candidate.startAngle) <= DEG &&
-        angularDistance(existing.sweep,candidate.sweep) <= DEG;
-      const reversedDirection = angularDistance(existing.startAngle,candidate.startAngle+candidate.sweep) <= DEG &&
-        angularDistance(existing.startAngle+existing.sweep,candidate.startAngle) <= DEG &&
-        Math.abs(Math.abs(existing.sweep)-Math.abs(candidate.sweep)) <= DEG;
-      return sameDirection || reversedDirection;
-    });
-    if (!duplicate) arcs.push({
-      cx: arcGeometry.cx,
-      cy: arcGeometry.cy,
-      r: arcGeometry.r,
-      startAngle: candidate.startAngle,
-      sweep: candidate.sweep,
-      confidence: candidate.confidence,
-      componentId: candidate.componentId
-    });
-  }
-
-  arcs.sort((a,b) => b.confidence - a.confidence);
-  return arcs.slice(0, 120);
-}
-
-function makeCircularArcPoly(cx, cy, radius, startAngle, sweep) {
-  if (!Number.isFinite(radius) || radius <= 0 || !Number.isFinite(sweep) || Math.abs(sweep) <= 1e-7) return null;
-  const segmentCount = Math.max(1, Math.ceil(Math.abs(sweep) / (Math.PI / 2)));
-  const delta = sweep / segmentCount;
-  const cb = CurveBuilder.create();
-  const start = {
-    x: cx + radius * Math.cos(startAngle),
-    y: cy + radius * Math.sin(startAngle)
-  };
-  cb.beginXY(start.x, start.y);
-
-  for (let i = 0; i < segmentCount; i++) {
-    const a0 = startAngle + delta * i;
-    const a1 = a0 + delta;
-    const alpha = 4 / 3 * Math.tan(delta / 4);
-    const p0 = { x: cx + radius * Math.cos(a0), y: cy + radius * Math.sin(a0) };
-    const p3 = { x: cx + radius * Math.cos(a1), y: cy + radius * Math.sin(a1) };
-    const t0 = { x: -Math.sin(a0), y: Math.cos(a0) };
-    const t1 = { x: -Math.sin(a1), y: Math.cos(a1) };
-    const c1 = { x: p0.x + alpha * radius * t0.x, y: p0.y + alpha * radius * t0.y };
-    const c2 = { x: p3.x - alpha * radius * t1.x, y: p3.y - alpha * radius * t1.y };
-    cb.addBezierXY(c1.x, c1.y, c2.x, c2.y, p3.x, p3.y);
-  }
-
-  const poly = PolyCurve.create();
-  poly.addCurve(cb.createCurve());
-  return poly;
+  return { cx, cy, r, confidence: 1 - (maxDev / allowedDev) };
 }
 
 function buildAnchorTopology(records, mergeTolerance) {
@@ -1056,7 +904,19 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       // Circle fitting is independent from the straight-edge classification.
       // A small curved Bézier must still be eligible for arc/ring detection even
       // when its scale makes the straightness tolerance classify it as an edge.
-      collectCircularArcFits(b, componentId, rawCircles, 0);
+      // Keep the circle-analysis gate from the working legacy implementation:
+      // only Bézier segments with meaningful departure from their chord are fitted.
+      const circleInvChord = chord > 1e-5 ? 1.0 / chord : 0;
+      const legacyH1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * circleInvChord;
+      const legacyH2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * circleInvChord;
+      const legacyStraightForCircle = (legacyH1 < 0.45 && legacyH2 < 0.45) || (dC1 < 0.5 && dC2 < 0.5);
+      if (!legacyStraightForCircle) {
+        const circleFit = fitCircleToBezier(b);
+        if (circleFit) {
+          circleFit.componentId = componentId;
+          rawCircles.push(circleFit);
+        }
+      }
 
       if (isSegmentStraight) {
         straightSegmentTotal++;
@@ -1351,8 +1211,8 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
   const uniqueCircles = [];
   for (const c of rawCircles) {
     const match = uniqueCircles.find(ex =>
-      dist(ex, c) < Math.max(objectScaleContext.diagonal * 0.0005, circleFeatureScale * 0.001) &&
-      Math.abs(ex.r - c.r) < Math.max(circleFeatureScale * 0.0008, c.r * 0.035)
+      dist(ex, c) < Math.max(3.0, c.r * 0.04) &&
+      Math.abs(ex.r - c.r) < Math.max(2.5, c.r * 0.035)
     );
     if (!match) {
       uniqueCircles.push({ cx: c.cx, cy: c.cy, r: c.r, confidence: c.confidence });
@@ -2511,7 +2371,6 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
   geom.displayCircles = circleAnalysis.circles;
-  geom.displayArcs = buildDisplayArcCandidates(geom.rawCircleCandidates || [], geom.bounds, circleAnalysis.families);
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
@@ -2815,10 +2674,7 @@ function main() {
 
   // Se for arranjo radial real, ativa modo 1; se for qualquer outro logo (incluindo cruzes e monogramas), ativa modo 0 (Smart Adaptive)
   const initialGridMode = isRadial ? 1 : 0;
-  const initialVisibleCircles = (initialGeom.displayCircles && initialGeom.displayCircles.length > 0)
-    ? initialGeom.displayCircles
-    : (initialGeom.circles || []);
-  const initialHasCircles = (initialGeom.displayArcs || []).length > 0 || initialVisibleCircles.length > 0;
+  const initialHasCircles = (initialGeom.circles || []).length > 0;
   const initialHasHandles = initialGeom.hasRealCurves && initialGeom.handles.length > 0;
   const initialHasSymmetry = initialGeom.symmetry.score >= 0.70;
   const initialHasModules = initialGeom.modules.confidence >= 0.70 && initialGeom.modules.axes.length > 0;
@@ -3155,37 +3011,12 @@ function main() {
     }
 
     // 2. Curvature Arcs & Rings
-    const visibleCircles = (geom.displayCircles && geom.displayCircles.length > 0)
-      ? geom.displayCircles
-      : (geom.circles || []);
-    const visibleArcs = geom.displayArcs || [];
-    if (showCirclesSwitch.value && (visibleArcs.length > 0 || visibleCircles.length > 0)) {
+    if (showCirclesSwitch.value && geom.circles.length > 0) {
       const defsArcs = [];
-      for (const arc of visibleArcs) {
-        const arcPoly = makeCircularArcPoly(arc.cx, arc.cy, arc.r, arc.startAngle, arc.sweep);
-        if (!arcPoly) continue;
-        defsArcs.push(PolyCurveNodeDefinition.create(arcPoly, noFill, outlineStroke, lsdOutline, noFill));
+      for (const c of geom.circles) {
+        defsArcs.push(PolyCurveNodeDefinition.create(makeSmoothCirclePoly(c.cx, c.cy, c.r), noFill, outlineStroke, lsdOutline, noFill));
       }
-
-      const geometryDiagonal = Math.max(Number.EPSILON * 100, Math.hypot(geom.bounds.width, geom.bounds.height));
-      const geometryMinorDimension = Math.max(
-        geometryDiagonal * 0.04,
-        Math.min(Math.abs(geom.bounds.width),Math.abs(geom.bounds.height))
-      );
-      const arcCircleCentreTolerance = Math.max(geometryDiagonal * 0.0005, geometryMinorDimension * 0.0045 * 1.8);
-      for (const circle of visibleCircles) {
-        const representedByArc = visibleArcs.some(arc =>
-          Math.hypot(arc.cx - circle.cx, arc.cy - circle.cy) <= arcCircleCentreTolerance &&
-          Math.abs(arc.r - circle.r) <= Math.max(geometryMinorDimension * 0.0006, circle.r * 0.022)
-        );
-        if (!representedByArc) {
-          defsArcs.push(PolyCurveNodeDefinition.create(
-            makeSmoothCirclePoly(circle.cx, circle.cy, circle.r),
-            noFill, outlineStroke, lsdOutline, noFill
-          ));
-        }
-      }
-      if (defsArcs.length) subContainers.push({ name: "2. Curvature Arcs & Rings", defs: defsArcs });
+      subContainers.push({ name: "2. Curvature Arcs & Rings", defs: defsArcs });
     }
 
     // 3. Construction Gridlines
