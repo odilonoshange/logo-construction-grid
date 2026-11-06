@@ -636,6 +636,45 @@ function fitCircleToBezier(b) {
   };
 }
 
+function splitBezierAtHalf(b) {
+  const midpoint = (a, c) => ({ x: (a.x + c.x) * 0.5, y: (a.y + c.y) * 0.5 });
+  const p01 = midpoint(b.start, b.c1);
+  const p12 = midpoint(b.c1, b.c2);
+  const p23 = midpoint(b.c2, b.end);
+  const p012 = midpoint(p01, p12);
+  const p123 = midpoint(p12, p23);
+  const p = midpoint(p012, p123);
+
+  return [
+    { start: b.start, c1: p01, c2: p012, end: p },
+    { start: p, c1: p123, c2: p23, end: b.end }
+  ];
+}
+
+// A Bézier may contain a useful circular portion without being circular as a
+// whole. Try the complete segment first, then progressively fit local spans.
+function collectCircularArcFits(bezier, componentId, output, depth) {
+  const level = Number.isFinite(depth) ? depth : 0;
+  const candidate = fitCircleToBezier(bezier);
+  const minimumSweep = 6 * DEG;
+
+  if (candidate && candidate.confidence >= 0.16) {
+    const sweep = Math.abs(candidate.sweep);
+    if (sweep >= minimumSweep && sweep <= Math.PI * 2 + 1e-5) {
+      candidate.componentId = componentId;
+      output.push(candidate);
+      return;
+    }
+    // Subdividing an almost straight span only makes its angular sweep smaller.
+    if (sweep < minimumSweep) return;
+  }
+
+  if (level >= 3) return;
+  const halves = splitBezierAtHalf(bezier);
+  collectCircularArcFits(halves[0], componentId, output, level + 1);
+  collectCircularArcFits(halves[1], componentId, output, level + 1);
+}
+
 function buildDisplayArcCandidates(rawCandidates, bounds, circleFamilies) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
   const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
@@ -1017,11 +1056,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       // Circle fitting is independent from the straight-edge classification.
       // A small curved Bézier must still be eligible for arc/ring detection even
       // when its scale makes the straightness tolerance classify it as an edge.
-      const circularFit = fitCircleToBezier(b);
-      if (circularFit) {
-        circularFit.componentId = componentId;
-        rawCircles.push(circularFit);
-      }
+      collectCircularArcFits(b, componentId, rawCircles, 0);
 
       if (isSegmentStraight) {
         straightSegmentTotal++;
