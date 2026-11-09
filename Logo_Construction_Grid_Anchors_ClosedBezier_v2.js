@@ -101,12 +101,38 @@ function extractPolyCurvesFromSingleNode(node) {
   } catch (e) { return null; }
 }
 
+function getDirectNodeChildren(node) {
+  if (!node) return [];
+
+  // Prefer a collection API when the node type exposes it.
+  try {
+    const children = toArray(node.children);
+    if (children.length) return children.filter(Boolean);
+  } catch (e) {}
+
+  // Affinity DOM nodes also expose their hierarchy as a linked sibling chain.
+  // This fallback is important for GroupNode and nested group selections.
+  const result = [];
+  const visited = new Set();
+  try {
+    let child = node.firstChild || null;
+    while (child && !visited.has(child)) {
+      visited.add(child);
+      result.push(child);
+      child = child.nextSibling || null;
+    }
+  } catch (e) {}
+
+  return result;
+}
+
 function extractCompositePolyCurve(rootNodes) {
   const masterPoly = PolyCurve.create();
   const components = [];
   const groups = [];
   let totalCurveCount = 0;
   let maxDepth = 0;
+  const visitedNodes = new Set();
 
   function getNodeLabel(node, fallback) {
     try {
@@ -117,10 +143,13 @@ function extractCompositePolyCurve(rootNodes) {
   }
 
   function traverse(node, depth, parentGroupIds) {
-    if (!node || isEmbeddedDocumentNode(node)) return;
+    if (!node || isEmbeddedDocumentNode(node) || visitedNodes.has(node)) return;
+    visitedNodes.add(node);
     maxDepth = Math.max(maxDepth, depth);
 
-    const children = toArray(node.children);
+    const children = getDirectNodeChildren(node);
+    let nextParents = parentGroupIds;
+
     if (children.length > 0) {
       const groupId = groups.length;
       groups.push({
@@ -130,31 +159,35 @@ function extractCompositePolyCurve(rootNodes) {
         parentGroupIds: parentGroupIds.slice(),
         childCount: children.length
       });
-      const nextParents = parentGroupIds.concat(groupId);
-      for (const child of children) traverse(child, depth + 1, nextParents);
-      return;
+      nextParents = parentGroupIds.concat(groupId);
     }
 
-    const directPc = extractPolyCurvesFromSingleNode(node);
-    if (!directPc || directPc.curveCount <= 0) return;
+    // Do not read aggregate geometry from a container: its child vectors are
+    // traversed individually, preventing the same paths from being added twice.
+    if (children.length === 0) {
+      const directPc = extractPolyCurvesFromSingleNode(node);
+      if (directPc && directPc.curveCount > 0) {
+        const curveStart = totalCurveCount;
+        for (let c = 0; c < directPc.curveCount; c++) {
+          masterPoly.addCurve(directPc.at(c).clone());
+          totalCurveCount++;
+        }
 
-    const curveStart = totalCurveCount;
-    for (let c = 0; c < directPc.curveCount; c++) {
-      masterPoly.addCurve(directPc.at(c).clone());
-      totalCurveCount++;
+        let bounds = null;
+        try { bounds = getExactCurveBounds(directPc); } catch (e) {}
+        components.push({
+          id: components.length,
+          label: getNodeLabel(node, "Component " + (components.length + 1)),
+          depth,
+          parentGroupIds: parentGroupIds.slice(),
+          curveStart,
+          curveCount: directPc.curveCount,
+          bounds
+        });
+      }
     }
 
-    let bounds = null;
-    try { bounds = getExactCurveBounds(directPc); } catch (e) {}
-    components.push({
-      id: components.length,
-      label: getNodeLabel(node, "Component " + (components.length + 1)),
-      depth,
-      parentGroupIds: parentGroupIds.slice(),
-      curveStart,
-      curveCount: directPc.curveCount,
-      bounds
-    });
+    for (const child of children) traverse(child, depth + 1, nextParents);
   }
 
   for (const node of (rootNodes || [])) traverse(node, 0, []);
