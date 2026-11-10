@@ -2403,6 +2403,9 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.directionFamilies = families;
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
+  // Render only the refined representative circles. geom.circles remains the
+  // complete deduplicated analysis set for topology and downstream metrics.
+  geom.displayCircles = circleAnalysis.circles;
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
@@ -2706,7 +2709,7 @@ function main() {
 
   // Se for arranjo radial real, ativa modo 1; se for qualquer outro logo (incluindo cruzes e monogramas), ativa modo 0 (Smart Adaptive)
   const initialGridMode = isRadial ? 1 : 0;
-  const initialHasCircles = (initialGeom.circles || []).length > 0;
+  const initialHasCircles = (initialGeom.displayCircles || []).length > 0;
   const initialHasHandles = initialGeom.hasRealCurves && initialGeom.handles.length > 0;
   const initialHasSymmetry = initialGeom.symmetry.score >= 0.70;
   const initialHasModules = initialGeom.modules.confidence >= 0.70 && initialGeom.modules.axes.length > 0;
@@ -3043,9 +3046,12 @@ function main() {
     }
 
     // 2. Curvature Arcs & Rings
-    if (showCirclesSwitch.value && geom.circles.length > 0) {
+    // Use the centre/radius representatives produced by refineCircleCandidates,
+    // not every independently fitted Bézier segment.
+    const visibleCircles = geom.displayCircles || geom.circles || [];
+    if (showCirclesSwitch.value && visibleCircles.length > 0) {
       const defsArcs = [];
-      for (const c of geom.circles) {
+      for (const c of visibleCircles) {
         defsArcs.push(PolyCurveNodeDefinition.create(makeSmoothCirclePoly(c.cx, c.cy, c.r), noFill, outlineStroke, lsdOutline, noFill));
       }
       subContainers.push({ name: "2. Curvature Arcs & Rings", defs: defsArcs });
