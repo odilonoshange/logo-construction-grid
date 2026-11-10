@@ -1244,11 +1244,25 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
   const uniqueCircles = [];
   for (const c of rawCircles) {
     const match = uniqueCircles.find(ex =>
+      ex.componentId === c.componentId &&
       dist(ex, c) < Math.max(3.0, c.r * 0.04) &&
       Math.abs(ex.r - c.r) < Math.max(2.5, c.r * 0.035)
     );
-    if (!match) {
-      uniqueCircles.push({ cx: c.cx, cy: c.cy, r: c.r, confidence: c.confidence });
+    if (match) {
+      const samples = match.samples || 1;
+      const nextSamples = samples + 1;
+      match.cx = (match.cx * samples + c.cx) / nextSamples;
+      match.cy = (match.cy * samples + c.cy) / nextSamples;
+      match.r = (match.r * samples + c.r) / nextSamples;
+      match.confidence = Math.max(match.confidence || 0, c.confidence || 0);
+      match.samples = nextSamples;
+    } else {
+      uniqueCircles.push({
+        cx: c.cx, cy: c.cy, r: c.r,
+        confidence: c.confidence,
+        samples: 1,
+        componentId: c.componentId
+      });
     }
   }
 
@@ -2253,7 +2267,11 @@ function refineCircleCandidates(rawCircles, bounds) {
   const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
   const minRadius = minorDimension * 0.0035;
   const maxRadius = diagonal * 2.25;
-  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0045);
+  // Bézier arcs belonging to one contour can return slightly different fitted
+  // centres. A tolerance tied to the glyph's minor dimension groups those fits
+  // without merging unrelated components into one construction family.
+  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.012);
+  const radiusTolerance = circle => Math.max(minorDimension * 0.002, circle.r * 0.04);
   const unique = [];
 
   for (const input of (rawCircles || [])) {
@@ -2265,32 +2283,44 @@ function refineCircleCandidates(rawCircles, bounds) {
     if (input.cx < bounds.x - margin || input.cx > bounds.x + bounds.width + margin ||
         input.cy < bounds.y - margin || input.cy > bounds.y + bounds.height + margin) continue;
 
+    const inputSamples = Math.max(1, Math.floor(input.samples || 1));
     const existing = unique.find(c =>
+      c.componentId === input.componentId &&
       Math.hypot(c.cx - input.cx, c.cy - input.cy) <= centreTolerance &&
-      Math.abs(c.r - input.r) <= Math.max(minorDimension * 0.0006, input.r * 0.022)
+      Math.abs(c.r - input.r) <= radiusTolerance(input)
     );
     if (existing) {
-      const total = existing.weight + confidence;
-      existing.cx = (existing.cx * existing.weight + input.cx * confidence) / total;
-      existing.cy = (existing.cy * existing.weight + input.cy * confidence) / total;
-      existing.r = (existing.r * existing.weight + input.r * confidence) / total;
+      const inputWeight = confidence * inputSamples;
+      const total = existing.weight + inputWeight;
+      existing.cx = (existing.cx * existing.weight + input.cx * inputWeight) / total;
+      existing.cy = (existing.cy * existing.weight + input.cy * inputWeight) / total;
+      existing.r = (existing.r * existing.weight + input.r * inputWeight) / total;
       existing.confidence = Math.max(existing.confidence, confidence);
       existing.weight = total;
-      existing.samples++;
+      existing.samples += inputSamples;
     } else {
       unique.push({
         cx: input.cx, cy: input.cy, r: input.r,
-        confidence, weight: confidence, samples: 1
+        confidence, weight: confidence * inputSamples,
+        samples: inputSamples,
+        componentId: input.componentId
       });
     }
   }
 
-  // Cluster by common centre, then retain radius tiers as separate circles.
+  // Cluster by common centre within the same vector component, then retain
+  // independent concentric radius tiers.
   const families = [];
   for (const circle of unique) {
-    let family = families.find(f => Math.hypot(f.cx - circle.cx, f.cy - circle.cy) <= centreTolerance * 1.8);
+    let family = families.find(f =>
+      f.componentId === circle.componentId &&
+      Math.hypot(f.cx - circle.cx, f.cy - circle.cy) <= centreTolerance * 1.8
+    );
     if (!family) {
-      family = { cx: circle.cx, cy: circle.cy, circles: [], centres: [], confidence: 0, centreSpread: 0 };
+      family = {
+        cx: circle.cx, cy: circle.cy, componentId: circle.componentId,
+        circles: [], centres: [], confidence: 0, centreSpread: 0
+      };
       families.push(family);
     }
     family.centres.push({ x: circle.cx, y: circle.cy });
@@ -2306,7 +2336,7 @@ function refineCircleCandidates(rawCircles, bounds) {
     const radiusTiers = [];
     for (const circle of family.circles) {
       const last = radiusTiers[radiusTiers.length - 1];
-      if (last && Math.abs(circle.r - last.r) <= Math.max(minorDimension * 0.0006, circle.r * 0.022)) {
+      if (last && Math.abs(circle.r - last.r) <= radiusTolerance(circle)) {
         const n = last.samples + circle.samples;
         last.r = (last.r * last.samples + circle.r * circle.samples) / n;
         last.confidence = Math.max(last.confidence, circle.confidence);
@@ -2348,8 +2378,21 @@ function refineCircleCandidates(rawCircles, bounds) {
       }
     }
 
-    for (const tier of family.circles) {
-      displayCircles.push({ cx: family.cx, cy: family.cy, r: tier.r, confidence: tier.confidence, familySize: family.circles.length });
+    const rankedTiers = family.circles.slice().sort((a, b) =>
+      ((b.samples || 1) * 2 + b.confidence) - ((a.samples || 1) * 2 + a.confidence)
+    );
+    const supportedTiers = rankedTiers.filter(tier =>
+      (tier.samples || 1) >= 2 || tier.confidence >= 0.88
+    );
+    const selectedTiers = (supportedTiers.length ? supportedTiers : rankedTiers.slice(0, 1)).slice(0, 3);
+    for (const tier of selectedTiers) {
+      displayCircles.push({
+        cx: family.cx, cy: family.cy, r: tier.r,
+        confidence: tier.confidence,
+        support: tier.samples || 1,
+        componentId: family.componentId,
+        familySize: family.circles.length
+      });
     }
   }
 
@@ -2403,8 +2446,8 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.directionFamilies = families;
   geom.modules = moduleSystems;
   geom.circleFamilies = circleAnalysis.families;
-  // Render only the refined representative circles. geom.circles remains the
-  // complete deduplicated analysis set for topology and downstream metrics.
+  // Render representative circles supported by clustered Bézier fits. The
+  // complete geometry candidates remain available for analysis and metrics.
   geom.displayCircles = circleAnalysis.circles;
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
