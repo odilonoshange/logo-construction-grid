@@ -1536,6 +1536,83 @@ function buildCollisionSafeLines(lines, features, mergeDist, referenceBounds) {
   return result;
 }
 
+function mergeCoincidentRenderedLines(items, mergeDistance, referenceBounds) {
+  const span = referenceBounds
+    ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
+    : 1000;
+  const positionTolerance = Math.max(span * 0.00035, (Number(mergeDistance) || 0) * 0.12);
+  const angleTolerance = Math.max(0.04 * DEG, Math.min(0.18 * DEG, Math.atan2(positionTolerance * 0.08, span)));
+  const sorted = (items || []).slice().sort((a,b) => {
+    const rank = item => (item.line.importance || 0) + Math.min(20, (item.line.support || 0) * 2);
+    return rank(b) - rank(a);
+  });
+  const merged = [];
+
+  function measure(item) {
+    const a = item.ext.p1, b = item.ext.p2;
+    const angle = canonicalLineAngle(Math.atan2(b.y - a.y, b.x - a.x));
+    const ux = Math.cos(angle), uy = Math.sin(angle);
+    const nx = -uy, ny = ux;
+    const mid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+    return {
+      angle, offset: mid.x * nx + mid.y * ny,
+      minT: Math.min(a.x * ux + a.y * uy, b.x * ux + b.y * uy),
+      maxT: Math.max(a.x * ux + a.y * uy, b.x * ux + b.y * uy)
+    };
+  }
+
+  function pointAt(angle, offset, t) {
+    const ux = Math.cos(angle), uy = Math.sin(angle);
+    const nx = -uy, ny = ux;
+    return { x: ux * t + nx * offset, y: uy * t + ny * offset };
+  }
+
+  for (const item of sorted) {
+    if (!item || !item.line || !item.ext || !item.ext.p1 || !item.ext.p2) continue;
+    const current = measure(item);
+    if (!Number.isFinite(current.minT) || !Number.isFinite(current.maxT) ||
+        current.maxT - current.minT <= Number.EPSILON * 100) continue;
+
+    let match = null;
+    for (const existing of merged) {
+      const previous = existing.measure;
+      if (lineAngleDiff(previous.angle, current.angle) > angleTolerance) continue;
+      if (Math.abs(previous.offset - current.offset) > positionTolerance) continue;
+      const gap = Math.max(0, Math.max(previous.minT, current.minT) -
+        Math.min(previous.maxT, current.maxT));
+      if (gap <= positionTolerance) { match = existing; break; }
+    }
+
+    if (!match) {
+      merged.push({ line: item.line, ext: item.ext, measure: current });
+      continue;
+    }
+
+    const previous = match.measure;
+    const previousRank = (match.line.importance || 0) + Math.min(20, (match.line.support || 0) * 2);
+    const currentRank = (item.line.importance || 0) + Math.min(20, (item.line.support || 0) * 2);
+    const winner = currentRank > previousRank ? item.line : match.line;
+    const previousWeight = Math.max(1, previousRank);
+    const currentWeight = Math.max(1, currentRank);
+    const offset = (previous.offset * previousWeight + current.offset * currentWeight) /
+      (previousWeight + currentWeight);
+    const angle = currentRank > previousRank ? current.angle : previous.angle;
+    const minT = Math.min(previous.minT, current.minT);
+    const maxT = Math.max(previous.maxT, current.maxT);
+
+    match.line = Object.assign({}, winner, {
+      angle, offset: 0,
+      importance: Math.max(match.line.importance || 0, item.line.importance || 0),
+      support: Math.max(match.line.support || 0, item.line.support || 0),
+      scopeKey: "merged"
+    });
+    match.ext = { p1: pointAt(angle, offset, minT), p2: pointAt(angle, offset, maxT) };
+    match.measure = measure(match);
+  }
+
+  return merged.map(item => ({ line: item.line, ext: item.ext }));
+}
+
 function positionlessTolerance(value) {
   return Math.max(Number.EPSILON * 100, Number(value) || 0);
 }
@@ -1617,12 +1694,18 @@ function addAlignmentLineCandidates(points, origin, angle, tolerance, output, ba
     seenCoordinates.add(key);
     minX = Math.min(minX,p.x); minY = Math.min(minY,p.y);
     maxX = Math.max(maxX,p.x); maxY = Math.max(maxY,p.y);
-    records.push({value:(p.x-origin.x)*nx+(p.y-origin.y)*ny,along:(p.x-origin.x)*ux+(p.y-origin.y)*uy,x:p.x,y:p.y,importance:p.importance||p.priority||0});
+    records.push({
+      value:(p.x-origin.x)*nx+(p.y-origin.y)*ny,
+      along:(p.x-origin.x)*ux+(p.y-origin.y)*uy,
+      x:p.x,y:p.y,
+      importance:p.importance||p.priority||0,
+      isAnchor:p.alignmentKind !== "landmark"
+    });
   }
   if(records.length<2)return;
   records.sort((x,y)=>x.value-y.value);
   const diagonal=Math.max(1,Math.hypot(maxX-minX,maxY-minY));
-  const minAlongSpan=Math.max(tolerance*2.5,diagonal*0.025);
+  const minAlongSpan=Math.max(tolerance*3.0,diagonal*0.045);
   const clusters=[];
   for(const record of records){
     const current=clusters[clusters.length-1];
@@ -1636,11 +1719,21 @@ function addAlignmentLineCandidates(points, origin, angle, tolerance, output, ba
   const rankedClusters=[];
   for(const cluster of clusters){
     if(cluster.records.length<2)continue;
-    let minAlong=Infinity,maxAlong=-Infinity;
-    for(const record of cluster.records){minAlong=Math.min(minAlong,record.along);maxAlong=Math.max(maxAlong,record.along);}
-    if(maxAlong-minAlong<minAlongSpan)continue;
+    let minAlong=Infinity,maxAlong=-Infinity,anchorSupport=0;
+    for(const record of cluster.records){
+      minAlong=Math.min(minAlong,record.along);
+      maxAlong=Math.max(maxAlong,record.along);
+      if(record.isAnchor)anchorSupport++;
+    }
+    const alongSpan=maxAlong-minAlong;
+    if(anchorSupport<2 || alongSpan<minAlongSpan)continue;
+    if(anchorSupport===2 && alongSpan<diagonal*0.075)continue;
     const support=cluster.records.length;
-    rankedClusters.push({cluster,support,score:baseImportance+Math.min(18,cluster.maxImportance*0.12)+Math.min(14,support*1.4)});
+    rankedClusters.push({
+      cluster,support,
+      score:baseImportance+Math.min(18,cluster.maxImportance*0.12)+
+        Math.min(14,anchorSupport*1.8)+Math.min(8,(alongSpan/diagonal)*20)
+    });
   }
   rankedClusters.sort((x,y)=>y.score-x.score);
   for(const entry of rankedClusters.slice(0,10)){
