@@ -947,6 +947,9 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
         const circleFit = fitCircleToBezier(b);
         if (circleFit) {
           circleFit.componentId = componentId;
+          circleFit.contourIndex = c;
+          circleFit.segmentIndex = bIdx;
+          circleFit.closedContour = closedContour;
           rawCircles.push(circleFit);
         }
       }
@@ -2367,143 +2370,209 @@ function approximateSmallRatio(value, maxTerm) {
 
 function refineCircleCandidates(rawCircles, bounds) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
-  const minorDimension = Math.max(diagonal * 0.04, Math.min(Math.abs(bounds.width), Math.abs(bounds.height)));
+  const minorDimension = Math.max(
+    diagonal * 0.04,
+    Math.min(Math.abs(bounds.width), Math.abs(bounds.height))
+  );
   const minRadius = minorDimension * 0.0035;
   const maxRadius = diagonal * 2.25;
-  // Bézier arcs belonging to one contour can return slightly different fitted
-  // centres. A tolerance tied to the glyph's minor dimension groups those fits
-  // without merging unrelated components into one construction family.
-  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.012);
-  const radiusTolerance = circle => Math.max(minorDimension * 0.002, circle.r * 0.04);
+
+  // Strict centre/radius tolerances prevent neighbouring round details from
+  // being combined into one concentric family.
+  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0045);
+  const radiusTolerance = circle => Math.max(minorDimension * 0.0006, circle.r * 0.022);
   const unique = [];
 
-  for (const input of (rawCircles || [])) {
+  function addContourSupport(target, contourIndex, segmentIndex) {
+    let contour = target.contourSupports.find(item => item.contourIndex === contourIndex);
+    if (!contour) {
+      contour = { contourIndex, segments: [] };
+      target.contourSupports.push(contour);
+    }
+    if (!contour.segments.includes(segmentIndex)) contour.segments.push(segmentIndex);
+  }
+
+  for (let inputIndex = 0; inputIndex < (rawCircles || []).length; inputIndex++) {
+    const input = rawCircles[inputIndex];
     if (!input || !Number.isFinite(input.cx) || !Number.isFinite(input.cy) || !Number.isFinite(input.r)) continue;
     if (input.r < minRadius || input.r > maxRadius) continue;
-    const confidence = Number.isFinite(input.confidence) ? clamp(input.confidence, 0, 1) : 0.58;
+
+    const confidence = Number.isFinite(input.confidence) ? clamp(input.confidence, 0, 1) : 0;
     if (confidence < 0.16) continue;
+
     const margin = diagonal * 1.25;
     if (input.cx < bounds.x - margin || input.cx > bounds.x + bounds.width + margin ||
         input.cy < bounds.y - margin || input.cy > bounds.y + bounds.height + margin) continue;
 
-    const inputSamples = Math.max(1, Math.floor(input.samples || 1));
-    const existing = unique.find(c =>
-      c.componentId === input.componentId &&
-      Math.hypot(c.cx - input.cx, c.cy - input.cy) <= centreTolerance &&
-      Math.abs(c.r - input.r) <= radiusTolerance(input)
+    const componentId = Number.isInteger(input.componentId) ? input.componentId : -1;
+    const contourIndex = Number.isInteger(input.contourIndex) ? input.contourIndex : -1;
+    const segmentIndex = Number.isInteger(input.segmentIndex) ? input.segmentIndex : inputIndex;
+    const existing = unique.find(circle =>
+      circle.componentId === componentId &&
+      circle.contourIndex === contourIndex &&
+      Math.hypot(circle.cx - input.cx, circle.cy - input.cy) <= centreTolerance &&
+      Math.abs(circle.r - input.r) <= radiusTolerance(input)
     );
+
     if (existing) {
-      const inputWeight = confidence * inputSamples;
-      const total = existing.weight + inputWeight;
-      existing.cx = (existing.cx * existing.weight + input.cx * inputWeight) / total;
-      existing.cy = (existing.cy * existing.weight + input.cy * inputWeight) / total;
-      existing.r = (existing.r * existing.weight + input.r * inputWeight) / total;
+      if (!existing.segmentIndexes.includes(segmentIndex)) {
+        const weight = Math.max(0.05, confidence);
+        const total = existing.weight + weight;
+        existing.cx = (existing.cx * existing.weight + input.cx * weight) / total;
+        existing.cy = (existing.cy * existing.weight + input.cy * weight) / total;
+        existing.r = (existing.r * existing.weight + input.r * weight) / total;
+        existing.weight = total;
+        existing.segmentIndexes.push(segmentIndex);
+        addContourSupport(existing, contourIndex, segmentIndex);
+      }
       existing.confidence = Math.max(existing.confidence, confidence);
-      existing.weight = total;
-      existing.samples += inputSamples;
     } else {
-      unique.push({
-        cx: input.cx, cy: input.cy, r: input.r,
-        confidence, weight: confidence * inputSamples,
-        samples: inputSamples,
-        componentId: input.componentId
-      });
+      const circle = {
+        cx: input.cx, cy: input.cy, r: input.r, confidence,
+        weight: Math.max(0.05, confidence),
+        componentId, contourIndex,
+        segmentIndexes: [segmentIndex],
+        contourSupports: []
+      };
+      addContourSupport(circle, contourIndex, segmentIndex);
+      unique.push(circle);
     }
   }
 
-  // Cluster by common centre within the same vector component, then retain
-  // independent concentric radius tiers.
+  // A family may combine genuinely concentric contours, but every fitted
+  // centre must remain close to every other centre. This avoids chain-clustering.
   const families = [];
   for (const circle of unique) {
-    let family = families.find(f =>
-      f.componentId === circle.componentId &&
-      Math.hypot(f.cx - circle.cx, f.cy - circle.cy) <= centreTolerance * 1.8
-    );
-    if (!family) {
-      family = {
+    let selected = null, bestDistance = Infinity;
+    for (const family of families) {
+      if (family.componentId !== circle.componentId) continue;
+      const d = Math.hypot(family.cx - circle.cx, family.cy - circle.cy);
+      if (d > centreTolerance) continue;
+      if (!family.centres.every(point =>
+        Math.hypot(point.x - circle.cx, point.y - circle.cy) <= centreTolerance
+      )) continue;
+      if (d < bestDistance) { selected = family; bestDistance = d; }
+    }
+    if (!selected) {
+      selected = {
         cx: circle.cx, cy: circle.cy, componentId: circle.componentId,
         circles: [], centres: [], confidence: 0, centreSpread: 0
       };
-      families.push(family);
+      families.push(selected);
     }
-    family.centres.push({ x: circle.cx, y: circle.cy });
-    family.circles.push(circle);
-    const n = family.circles.length;
-    family.cx += (circle.cx - family.cx) / n;
-    family.cy += (circle.cy - family.cy) / n;
+    selected.centres.push({ x: circle.cx, y: circle.cy });
+    selected.circles.push(circle);
+    const n = selected.centres.length;
+    selected.cx += (circle.cx - selected.cx) / n;
+    selected.cy += (circle.cy - selected.cy) / n;
   }
 
   const displayCircles = [];
+  const confirmedFamilies = [];
   for (const family of families) {
-    family.circles.sort((a, b) => a.r - b.r);
-    const radiusTiers = [];
-    for (const circle of family.circles) {
-      const last = radiusTiers[radiusTiers.length - 1];
-      if (last && Math.abs(circle.r - last.r) <= radiusTolerance(circle)) {
-        const n = last.samples + circle.samples;
-        last.r = (last.r * last.samples + circle.r * circle.samples) / n;
-        last.confidence = Math.max(last.confidence, circle.confidence);
-        last.samples = n;
-      } else {
-        radiusTiers.push({ r: circle.r, confidence: circle.confidence, samples: circle.samples });
-      }
-    }
-    family.circles = radiusTiers;
-    const spread = family.circles.length ? family.circles.reduce((sum, c) => sum + c.confidence, 0) / family.circles.length : 0;
-    family.confidence = spread;
     family.centreSpread = family.centres.length > 1
-      ? Math.max.apply(null, family.centres.map(p => Math.hypot(p.x - family.cx, p.y - family.cy)))
+      ? Math.max(...family.centres.map(point => Math.hypot(point.x-family.cx,point.y-family.cy)))
       : 0;
-    family.confidence *= clamp(1 - family.centreSpread / Math.max(centreTolerance * 1.8, EPS), 0.55, 1);
-    delete family.centres;
+    if (family.centreSpread > centreTolerance) continue;
 
-    const radii = family.circles.map(c => c.r);
+    const radiusTiers = [];
+    family.circles.sort((a,b) => a.r-b.r);
+    for (const circle of family.circles) {
+      let tier = radiusTiers.find(item => Math.abs(item.r-circle.r) <= radiusTolerance(circle));
+      if (!tier) {
+        tier = {
+          r: circle.r, confidence: circle.confidence, weight: 0,
+          contourSupports: [], segmentSupport: 0, contourSupportCount: 0
+        };
+        radiusTiers.push(tier);
+      }
+      const weight = Math.max(1,circle.segmentIndexes.length);
+      tier.r = (tier.r*tier.weight + circle.r*weight)/(tier.weight+weight);
+      tier.weight += weight;
+      tier.confidence = Math.max(tier.confidence,circle.confidence);
+
+      for (const support of circle.contourSupports) {
+        let target = tier.contourSupports.find(item => item.contourIndex===support.contourIndex);
+        if (!target) {
+          target = { contourIndex:support.contourIndex, segments:[] };
+          tier.contourSupports.push(target);
+        }
+        for (const segment of support.segments) {
+          if (!target.segments.includes(segment)) target.segments.push(segment);
+        }
+      }
+    }
+
+    // A full construction ring requires independent support from at least two
+    // Bézier segments on the same contour. One rounded corner is not a circle.
+    const supportedTiers = radiusTiers.filter(tier => {
+      tier.segmentSupport = tier.contourSupports.reduce(
+        (maximum,item) => Math.max(maximum,item.segments.length),0
+      );
+      tier.contourSupportCount = tier.contourSupports.filter(item => item.segments.length>=2).length;
+      return tier.segmentSupport >= 2;
+    });
+    if (!supportedTiers.length) continue;
+
+    family.circles = supportedTiers.sort((a,b)=>a.r-b.r).map(tier => ({
+      r:tier.r, confidence:tier.confidence,
+      samples:tier.segmentSupport,
+      contourSupportCount:tier.contourSupportCount
+    }));
+    family.confidence = family.circles.reduce((sum,circle)=>sum+circle.confidence,0)/family.circles.length;
+    family.confidence *= clamp(1-family.centreSpread/Math.max(centreTolerance,EPS),0.35,1);
+
+    const radii = family.circles.map(circle=>circle.r);
     const gaps = [];
-    for (let i = 1; i < radii.length; i++) gaps.push(radii[i] - radii[i - 1]);
-    let radiusModule = 0, radiusModuleConfidence = 0;
-    if (gaps.length >= 2) {
-      const sortedGaps = gaps.slice().sort((a, b) => a - b);
-      const median = sortedGaps[Math.floor(sortedGaps.length / 2)];
-      const close = gaps.filter(g => Math.abs(g - median) <= Math.max(minorDimension * 0.0006, median * 0.045));
-      if (median >= minRadius && close.length >= 2) {
-        radiusModule = close.reduce((sum, g) => sum + g, 0) / close.length;
-        radiusModuleConfidence = close.length / gaps.length * family.confidence;
+    for(let i=1;i<radii.length;i++)gaps.push(radii[i]-radii[i-1]);
+    let radiusModule=0,radiusModuleConfidence=0;
+    if(gaps.length>=2){
+      const sortedGaps=gaps.slice().sort((a,b)=>a-b);
+      const median=sortedGaps[Math.floor(sortedGaps.length/2)];
+      const close=gaps.filter(gap=>Math.abs(gap-median)<=Math.max(minorDimension*0.0006,median*0.045));
+      if(median>=minRadius&&close.length>=2){
+        radiusModule=close.reduce((sum,gap)=>sum+gap,0)/close.length;
+        radiusModuleConfidence=close.length/gaps.length*family.confidence;
       }
     }
-    family.radiusModule = radiusModule;
-    family.radiusModuleConfidence = radiusModuleConfidence;
-    family.radiusRatios = [];
-    if (radii.length >= 2) {
-      const base = radii[0];
-      for (let i = 1; i < radii.length; i++) {
-        const ratio = approximateSmallRatio(radii[i] / base, 6);
-        if (ratio) family.radiusRatios.push({ innerRadius: base, outerRadius: radii[i], ratio, confidence: Math.min(family.confidence, 1 - ratio.error * 8) });
+    family.radiusModule=radiusModule;
+    family.radiusModuleConfidence=radiusModuleConfidence;
+    family.radiusRatios=[];
+    if(radii.length>=2){
+      const base=radii[0];
+      for(let i=1;i<radii.length;i++){
+        const ratio=approximateSmallRatio(radii[i]/base,6);
+        if(ratio)family.radiusRatios.push({
+          innerRadius:base,outerRadius:radii[i],ratio,
+          confidence:Math.min(family.confidence,1-ratio.error*8)
+        });
       }
     }
 
-    const rankedTiers = family.circles.slice().sort((a, b) =>
-      ((b.samples || 1) * 2 + b.confidence) - ((a.samples || 1) * 2 + a.confidence)
+    const rankedTiers=family.circles.slice().sort((a,b)=>
+      (b.samples*2+b.confidence)-(a.samples*2+a.confidence)
     );
-    // Prefer circles confirmed by multiple Bézier fits. Only use isolated
-    // high-confidence fits when the family has no repeated support at all.
-    const supportedTiers = rankedTiers.filter(tier => (tier.samples || 1) >= 2);
-    const isolatedTiers = rankedTiers.filter(tier => tier.confidence >= 0.88);
-    const selectedTiers = (supportedTiers.length ? supportedTiers : (isolatedTiers.length ? isolatedTiers : rankedTiers.slice(0, 1))).slice(0, 3);
-    for (const tier of selectedTiers) {
+    for(const tier of rankedTiers.slice(0,3)){
       displayCircles.push({
-        cx: family.cx, cy: family.cy, r: tier.r,
-        confidence: tier.confidence,
-        support: tier.samples || 1,
-        componentId: family.componentId,
-        familySize: family.circles.length
+        cx:family.cx,cy:family.cy,r:tier.r,confidence:tier.confidence,
+        support:tier.samples,contourSupportCount:tier.contourSupportCount,
+        componentId:family.componentId,familySize:family.circles.length
       });
     }
+
+    delete family.centres;
+    confirmedFamilies.push(family);
   }
 
-  displayCircles.sort((a, b) => (b.confidence + Math.min(0.2, b.familySize * 0.04)) - (a.confidence + Math.min(0.2, a.familySize * 0.04)));
-  const limitedCircles = displayCircles.slice(0, 48);
-  const relationCount = families.reduce((sum, f) => sum + f.radiusRatios.length, 0);
-  return { circles: limitedCircles, families, relationCount };
+  displayCircles.sort((a,b)=>
+    (b.confidence+Math.min(0.2,b.support*0.025))-
+    (a.confidence+Math.min(0.2,a.support*0.025))
+  );
+  return {
+    circles:displayCircles.slice(0,48),
+    families:confirmedFamilies,
+    relationCount:confirmedFamilies.reduce((sum,family)=>sum+family.radiusRatios.length,0)
+  };
 }
 
 function classifyGeometryProfile(geom) {
@@ -2542,7 +2611,7 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   const families = detectDirectionFamilies(evidence, geom.dominantAngle);
   const primaryAngle = families.length ? families[0].angle : geom.dominantAngle;
   const moduleSystems = detectModularSystems(geom, families);
-  const circleAnalysis = refineCircleCandidates(geom.circles, geom.bounds);
+  const circleAnalysis = refineCircleCandidates(geom.rawCircleCandidates || geom.circles, geom.bounds);
 
   // Derived analysis is attached alongside, never written into the anchors,
   // handles, Bézier records, radial petals or original circle candidates.
@@ -3407,40 +3476,25 @@ function main() {
 
         // Curvature centres create useful cross-axes, while the actual circles
         // remain in their independent layer.
-        if ((showCirclesSwitch.value || showModulesSwitch.value) && geom.circleFamilies && geom.circleFamilies.length > 0) {
-          addCircleFamilyConstructionCandidates(geom.circleFamilies, candidates);
-        }
-
-        if (showModulesSwitch.value) {
-          const localCircleComponents = (geom.componentAnalysis || [])
-            .map(component => {
-              const family = (component.localCircleFamilies || [])
-                .filter(item => item.circles.length >= 2 &&
-                  item.confidence >= 0.78 &&
-                  (item.radiusRatios.length > 0 || item.radiusModuleConfidence >= 0.75))
-                .sort((a,b) => b.confidence-a.confidence)[0];
-              return family ? {component,family} : null;
-            })
-            .filter(Boolean)
-            .sort((a,b) => b.family.confidence-a.family.confidence)
-            .slice(0,2);
-
-          for (const item of localCircleComponents) {
-            const bounds = item.component.bounds;
-            if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) continue;
-            addCircleFamilyConstructionCandidates([item.family],candidates,{
+        if (showModulesSwitch.value && geom.circleFamilies && geom.circleFamilies.length > 0) {
+          for (const family of geom.circleFamilies) {
+            const component = (componentModel && componentModel.components || [])
+              .find(item => item.id === family.componentId);
+            if (!component || !component.bounds) continue;
+            addCircleFamilyConstructionCandidates([family], candidates, {
               maxFamilies:1,
               maxRings:2,
               minConfidence:0.78,
-              importance:63,
-              axisSource:"component-circle-centre-axis",
-              boundarySource:"component-circle-ratio-boundary",
-              componentId:item.component.id,
-              scopeKey:"component:"+item.component.id,
-              clipBounds:bounds
+              importance:62,
+              componentId:family.componentId,
+              scopeKey:"component:"+family.componentId,
+              clipBounds:component.bounds
             });
           }
         }
+
+        // Component-scoped circle families above are the single source for
+        // circular construction axes; do not add a second local copy.
 
         if (showSymmetrySwitch.value && constructionSymmetry.score >= 0.70) {
           candidates.push({
