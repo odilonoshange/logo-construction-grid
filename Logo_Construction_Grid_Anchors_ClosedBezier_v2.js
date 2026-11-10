@@ -2588,9 +2588,9 @@ function refineCircleCandidates(rawCircles, bounds) {
       );
       tier.contourSupportCount = tier.contourSupports.filter(item =>
         item.segments.length >= 2 &&
-        item.segments.length / Math.max(1,item.totalSegments || 1) >= 0.45
+        item.segments.length / Math.max(1,item.totalSegments || 1) >= 0.60
       ).length;
-      return tier.segmentSupport >= 2 && tier.segmentCoverage >= 0.45 && tier.contourSupportCount > 0;
+      return tier.segmentSupport >= 2 && tier.segmentCoverage >= 0.60 && tier.contourSupportCount > 0;
     });
     if (!supportedTiers.length) continue;
 
