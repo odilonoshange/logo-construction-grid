@@ -1517,11 +1517,10 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
 
       // Keep disconnected collinear edges. A finite segment and a full inferred
       // alignment are also kept separate until the post-clipping overlap pass.
-      if(finiteSegment || existing.finiteSegment){
-        if(!finiteSegment || !existing.finiteSegment)return false;
-        const interval=projectedInterval(existing,angle);
-        const gap=Math.max(0,Math.max(interval.min,currentInterval.min)-Math.min(interval.max,currentInterval.max));
-        return gap<=positionTolerance;
+      if(finiteSegment || existing.finiteSegment) {
+        // Keep finite path edges intact here. Their actual overlap is resolved
+        // after clipping, when the rendered intervals are known.
+        return false;
       }
       return true;
     });
@@ -2066,11 +2065,7 @@ function detectDirectionFamilies(evidence, fallbackAngle) {
   const samples = evidence && evidence.samples ? evidence.samples.filter(s =>
     s && Number.isFinite(s.angle) && Number.isFinite(s.weight) && s.weight > EPS
   ) : [];
-  if (!samples.length) {
-    return Number.isFinite(fallbackAngle)
-      ? [{ angle: canonicalLineAngle(fallbackAngle), weight: 1, share: 1, confidence: 0.25, supportCount: 1, straightSupport: 0, curveSupport: 0 }]
-      : [];
-  }
+  if (!samples.length) return [];
 
   const totalWeight = samples.reduce((sum, s) => sum + s.weight, 0) || 1;
   const binCount = 180;
@@ -3486,7 +3481,13 @@ function main() {
         const preciseAngle = initialPreciseAngle;
         const geometryDiagonal = Math.max(Number.EPSILON * 100, Math.hypot(exactBounds.width, exactBounds.height));
         const alignmentTolerance = Math.max(geometryDiagonal * 0.0015, effectiveMergeDistance * 0.18);
-        const directionFamilies = (geom.directionFamilies || []).slice(0, 4);
+        // Only measured straight-edge families become long construction axes.
+        // Curve tangents remain local Bézier evidence and must not dictate a
+        // page-wide grid direction on rounded or organic lettering.
+        const directionFamilies = (geom.directionFamilies || [])
+          .filter(family => family.straightSupport > 0 &&
+            family.confidence >= 0.58 && family.share >= 0.085)
+          .slice(0, 4);
         const profileAlignmentPoints = selectedProfile === "typographic"
           ? alignmentPoints.filter(point => point.alignmentKind === "anchor")
           : alignmentPoints;
