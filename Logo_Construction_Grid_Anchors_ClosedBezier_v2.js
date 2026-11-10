@@ -616,57 +616,118 @@ function calculateNearestDistances(points, searchRadius) {
 }
 
 function fitCircleToBezier(b) {
-  const chord = dist(b.start, b.end);
-  if (chord < 1.0) return null;
+  // Fit in normalized local coordinates. This keeps the solver stable for both
+  // tiny vector details and large document-space curves.
+  const localScale = Math.max(
+    dist(b.start, b.c1), dist(b.c1, b.c2), dist(b.c2, b.end), dist(b.start, b.end)
+  );
+  if (!Number.isFinite(localScale) || localScale <= Number.EPSILON * 100) return null;
 
-  const dx = b.end.x - b.start.x, dy = b.end.y - b.start.y;
-  const invChord = 1.0 / chord;
-  const h1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * invChord;
-  const h2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * invChord;
-  if (h1 < 0.45 && h2 < 0.45) return null;
-
-  const N = 7;
-  const pts = [];
-  let sumX = 0, sumY = 0;
-  for (let i = 0; i < N; i++) {
-    const t = i / (N - 1);
-    const p = cubicPoint(b, t);
-    pts.push(p);
-    sumX += p.x; sumY += p.y;
+  const FIT_SAMPLES = 11;
+  const points = [];
+  let meanX = 0, meanY = 0;
+  for (let i = 0; i < FIT_SAMPLES; i++) {
+    const point = cubicPoint(b, i / (FIT_SAMPLES - 1));
+    points.push(point);
+    meanX += point.x;
+    meanY += point.y;
   }
-  const mx = sumX / N, my = sumY / N;
+  meanX /= FIT_SAMPLES;
+  meanY /= FIT_SAMPLES;
 
   let Suu = 0, Svv = 0, Suv = 0;
   let Suuu = 0, Svvv = 0, Suvv = 0, Svuu = 0;
-  for (let i = 0; i < N; i++) {
-    const u = pts[i].x - mx, v = pts[i].y - my;
+  for (const point of points) {
+    const u = (point.x - meanX) / localScale;
+    const v = (point.y - meanY) / localScale;
     const u2 = u * u, v2 = v * v;
-    Suu += u2; Svv += v2; Suv += u * v;
-    Suuu += u2 * u; Svvv += v2 * v;
-    Suvv += u * v2; Svuu += v * u2;
+    Suu += u2;
+    Svv += v2;
+    Suv += u * v;
+    Suuu += u2 * u;
+    Svvv += v2 * v;
+    Suvv += u * v2;
+    Svuu += v * u2;
   }
 
-  const det = Suu * Svv - Suv * Suv;
-  if (Math.abs(det) < 1e-4) return null;
+  const determinant = Suu * Svv - Suv * Suv;
+  if (!Number.isFinite(determinant) || Math.abs(determinant) <= 1e-12) return null;
 
   const rhs1 = 0.5 * (Suuu + Suvv);
   const rhs2 = 0.5 * (Svvv + Svuu);
-  const uc = (rhs1 * Svv - rhs2 * Suv) / det;
-  const vc = (Suu * rhs2 - Suv * rhs1) / det;
-  const cx = uc + mx, cy = vc + my;
-  const r = Math.sqrt(uc * uc + vc * vc + (Suu + Svv) / N);
+  const centreU = (rhs1 * Svv - rhs2 * Suv) / determinant;
+  const centreV = (Suu * rhs2 - Suv * rhs1) / determinant;
+  const radiusNormalised = Math.sqrt(
+    centreU * centreU + centreV * centreV + (Suu + Svv) / FIT_SAMPLES
+  );
+  const cx = meanX + centreU * localScale;
+  const cy = meanY + centreV * localScale;
+  const radius = radiusNormalised * localScale;
 
-  if (!isFinite(r) || r < 2.5 || r > 8000.0) return null;
+  // A very large radius relative to this segment is effectively a straight line;
+  // a very small one is usually a cusp or a degenerate control polygon.
+  if (!Number.isFinite(radius) || radius < localScale * 0.02 || radius > localScale * 100) return null;
 
-  let maxDev = 0;
-  for (let i = 0; i < N; i++) {
-    const d = Math.abs(dist(pts[i], { x: cx, y: cy }) - r);
-    if (d > maxDev) maxDev = d;
+  // Validate the complete cubic, not only the sparse points used by the fit.
+  // This catches inflections and variable-curvature segments that happen to
+  // look circular at seven isolated samples.
+  const VALIDATION_SAMPLES = 49;
+  const centre = { x: cx, y: cy };
+  let maxDeviation = 0;
+  let maxTangentError = 0;
+  let sweep = 0;
+  let previousAngle = null;
+  let previousTurnSign = 0;
+  let directionChanges = 0;
+
+  for (let i = 0; i < VALIDATION_SAMPLES; i++) {
+    const t = i / (VALIDATION_SAMPLES - 1);
+    const point = cubicPoint(b, t);
+    const radialX = point.x - cx;
+    const radialY = point.y - cy;
+    const radialLength = Math.hypot(radialX, radialY);
+    if (!Number.isFinite(radialLength) || radialLength <= Number.EPSILON * 100) return null;
+
+    maxDeviation = Math.max(maxDeviation, Math.abs(radialLength - radius));
+
+    const angle = Math.atan2(radialY, radialX);
+    if (previousAngle !== null) {
+      let delta = angle - previousAngle;
+      while (delta > Math.PI) delta -= Math.PI * 2;
+      while (delta < -Math.PI) delta += Math.PI * 2;
+      sweep += delta;
+      if (Math.abs(delta) > 0.02 * DEG) {
+        const turnSign = delta > 0 ? 1 : -1;
+        if (previousTurnSign && turnSign !== previousTurnSign) directionChanges++;
+        previousTurnSign = turnSign;
+      }
+    }
+    previousAngle = angle;
+
+    const tangent = cubicDerivative(b, t);
+    const tangentLength = Math.hypot(tangent.x, tangent.y);
+    if (tangentLength > localScale * 1e-9) {
+      const radialAlignment = Math.abs(
+        (tangent.x * radialX + tangent.y * radialY) / (tangentLength * radialLength)
+      );
+      maxTangentError = Math.max(maxTangentError, radialAlignment);
+    }
   }
-  const allowedDev = Math.max(0.65, r * 0.022);
-  if (maxDev > allowedDev) return null;
 
-  return { cx, cy, r, confidence: 1 - (maxDev / allowedDev) };
+  const absoluteSweep = Math.abs(sweep);
+  if (absoluteSweep < 6 * DEG || absoluteSweep > 200 * DEG || directionChanges > 0) return null;
+
+  const allowedDeviation = Math.max(localScale * 0.001, radius * 0.008);
+  if (maxDeviation > allowedDeviation) return null;
+  if (maxTangentError > Math.sin(10 * DEG)) return null;
+
+  const confidence = clamp(1 - maxDeviation / allowedDeviation, 0, 1);
+  return {
+    cx, cy, r: radius, confidence,
+    arcSweep: absoluteSweep,
+    maxDeviation,
+    maxTangentError
+  };
 }
 
 function buildAnchorTopology(records, mergeTolerance) {
@@ -956,16 +1017,10 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       // chord as proof that the segment is straight.
       const isSegmentStraight = referenceLength > 1e-10 && h1 < straightTolerance && h2 < straightTolerance;
 
-      // Circle fitting is independent from the straight-edge classification.
-      // A small curved Bézier must still be eligible for arc/ring detection even
-      // when its scale makes the straightness tolerance classify it as an edge.
-      // Keep the circle-analysis gate from the working legacy implementation:
-      // only Bézier segments with meaningful departure from their chord are fitted.
-      const circleInvChord = chord > 1e-5 ? 1.0 / chord : 0;
-      const legacyH1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * circleInvChord;
-      const legacyH2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * circleInvChord;
-      const legacyStraightForCircle = legacyH1 < 0.45 && legacyH2 < 0.45;
-      if (!legacyStraightForCircle) {
+      // Circle fitting only runs on genuinely curved Bézier segments. The fit
+      // itself uses scale-relative geometry and dense validation, so an absolute
+      // 0.45-unit chord threshold cannot suppress small but real circular arcs.
+      if (!isSegmentStraight) {
         const circleFit = fitCircleToBezier(b);
         if (circleFit) {
           circleFit.componentId = componentId;
@@ -1472,9 +1527,12 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
   const span = referenceBounds
     ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
+  const minorSpan = referenceBounds
+    ? Math.max(Number.EPSILON * 100, Math.min(Math.abs(referenceBounds.width), Math.abs(referenceBounds.height)))
+    : span;
   const positionTolerance = Math.max(
-    span * 0.0005,
-    Math.min((Number(mergeDist) || 0) * 0.08, span * 0.001)
+    Math.min(span * 0.0005, minorSpan * 0.001),
+    Math.min((Number(mergeDist) || 0) * 0.08, minorSpan * 0.001)
   );
   const angleTolerance = Math.max(0.06 * DEG, Math.min(0.45 * DEG, Math.atan2(positionTolerance * 0.35, span)));
   const sorted = rawLines.slice().sort((a,b) => {
@@ -1578,9 +1636,16 @@ function buildCollisionSafeLines(lines, features, mergeDist, referenceBounds) {
         if (!belongs) continue;
       }
       const d = Math.abs(p.x * nx + p.y * ny - offset);
+      const supportDiagonal = Math.hypot(
+        referenceBounds && referenceBounds.width || 0,
+        referenceBounds && referenceBounds.height || 0
+      );
+      const supportMinorSpan = referenceBounds
+        ? Math.max(Number.EPSILON * 100, Math.min(Math.abs(referenceBounds.width), Math.abs(referenceBounds.height)))
+        : supportDiagonal;
       const supportTolerance = Math.max(
-        Math.hypot(referenceBounds && referenceBounds.width || 0, referenceBounds && referenceBounds.height || 0) * 0.0015,
-        positionlessTolerance(mergeDist) * 0.18
+        Math.min(supportDiagonal * 0.0015, supportMinorSpan * 0.025),
+        Math.min(positionlessTolerance(mergeDist) * 0.18, supportMinorSpan * 0.025)
       );
       if (d <= supportTolerance) support++;
     }
@@ -1597,9 +1662,12 @@ function mergeCoincidentRenderedLines(items, mergeDistance, referenceBounds) {
   const span = referenceBounds
     ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
+  const minorSpan = referenceBounds
+    ? Math.max(Number.EPSILON * 100, Math.min(Math.abs(referenceBounds.width), Math.abs(referenceBounds.height)))
+    : span;
   const positionTolerance = Math.max(
-    span * 0.0005,
-    Math.min((Number(mergeDistance) || 0) * 0.08, span * 0.001)
+    Math.min(span * 0.0005, minorSpan * 0.001),
+    Math.min((Number(mergeDistance) || 0) * 0.08, minorSpan * 0.001)
   );
   const angleTolerance = Math.max(0.04 * DEG, Math.min(0.18 * DEG, Math.atan2(positionTolerance * 0.08, span)));
   const sorted = (items || []).slice().sort((a,b) => {
@@ -1771,7 +1839,7 @@ function getExactCurveBounds(polyCurve) {
   };
 }
 
-function addAlignmentLineCandidates(points, origin, angle, tolerance, output, baseImportance, source) {
+function addAlignmentLineCandidates(points, origin, angle, tolerance, output, baseImportance, source, minimumAnchorSupport) {
   if (!points || points.length < 2) return;
   const nx = -Math.sin(angle), ny = Math.cos(angle);
   const ux = Math.cos(angle), uy = Math.sin(angle);
@@ -1819,7 +1887,7 @@ function addAlignmentLineCandidates(points, origin, angle, tolerance, output, ba
     // Two points always define a line mathematically, but not necessarily a
     // meaningful construction axis. Require three active anchors for inferred
     // alignments; direct structural edges are handled by their own segment path.
-    if(anchorSupport<3 || alongSpan<minAlongSpan)continue;
+    if(anchorSupport<(Number.isInteger(minimumAnchorSupport)?minimumAnchorSupport:3) || alongSpan<minAlongSpan)continue;
     const support=cluster.records.length;
     rankedClusters.push({
       cluster,support,
@@ -1859,6 +1927,67 @@ function addCurveExtremumTangents(polyCurve, output) {
       }
     }
   }
+}
+
+function addFallbackCurveGuideCandidates(polyCurve, handles, output, bounds, maxGuides) {
+  if (!Array.isArray(output)) return 0;
+  const limit = Math.max(1, Math.min(6, Number.isInteger(maxGuides) ? maxGuides : 4));
+  const diagonal = bounds
+    ? Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height))
+    : 1000;
+  const positionTolerance = Math.max(Number.EPSILON * 100, diagonal * 0.0005);
+  const selected = [];
+
+  function append(candidate) {
+    if (!candidate || !candidate.p1 || !Number.isFinite(candidate.p1.x) ||
+        !Number.isFinite(candidate.p1.y) || !Number.isFinite(candidate.angle)) return;
+    const angle = canonicalLineAngle(candidate.angle);
+    const normalX = -Math.sin(angle), normalY = Math.cos(angle);
+    const offset = candidate.p1.x * normalX + candidate.p1.y * normalY;
+    const duplicate = selected.some(existing => {
+      if (lineAngleDiff(existing.angle, angle) > 0.75 * DEG) return false;
+      const existingOffset = existing.p1.x * (-Math.sin(existing.angle)) +
+        existing.p1.y * Math.cos(existing.angle);
+      return Math.abs(existingOffset - offset) <= positionTolerance;
+    });
+    if (!duplicate) selected.push(Object.assign({}, candidate, { angle }));
+  }
+
+  const extrema = [];
+  addCurveExtremumTangents(polyCurve, extrema);
+  extrema.sort((a, b) => (b.importance || 0) - (a.importance || 0));
+  for (const candidate of extrema) {
+    if (selected.length >= limit) break;
+    append(candidate);
+  }
+
+  if (selected.length < limit) {
+    const orderedHandles = (handles || []).filter(handle =>
+      handle && handle.anchor && handle.handle &&
+      Number.isFinite(handle.anchor.x) && Number.isFinite(handle.anchor.y) &&
+      Number.isFinite(handle.handle.x) && Number.isFinite(handle.handle.y) &&
+      dist(handle.anchor, handle.handle) > Number.EPSILON * 100
+    ).slice().sort((a, b) => (b.baseLength || dist(b.anchor, b.handle)) -
+      (a.baseLength || dist(a.anchor, a.handle)));
+
+    for (const handle of orderedHandles) {
+      if (selected.length >= limit) break;
+      const dx = handle.handle.x - handle.anchor.x;
+      const dy = handle.handle.y - handle.anchor.y;
+      append({
+        p1: { x: handle.anchor.x, y: handle.anchor.y },
+        angle: Math.atan2(dy, dx),
+        importance: 66,
+        support: 1,
+        source: "fallback-bezier-tangent",
+        componentId: Number.isInteger(handle.componentId) ? handle.componentId : undefined,
+        scopeKey: Number.isInteger(handle.componentId) ? "component:" + handle.componentId : undefined
+      });
+    }
+  }
+
+  output.push.apply(output, selected);
+  return selected.length;
 }
 
 function addBezierTangentCandidates(polyCurve, handles, output, includeRawCurves) {
@@ -2446,17 +2575,16 @@ function approximateSmallRatio(value, maxTerm) {
 function refineCircleCandidates(rawCircles, bounds) {
   const diagonal = Math.max(Number.EPSILON * 100, Math.hypot(bounds.width, bounds.height));
   const minorDimension = Math.max(
-    diagonal * 0.04,
+    Number.EPSILON * 100,
     Math.min(Math.abs(bounds.width), Math.abs(bounds.height))
   );
-  const minRadius = minorDimension * 0.0035;
+  const minRadius = Math.max(diagonal * 1e-6, minorDimension * 0.0025);
   const maxRadius = diagonal * 2.25;
 
-  // Keep centre/radius comparisons precise, but do not require every circle
-  // fragment to belong to the same Curve contour. Selected groups may contain
-  // one Bézier arc per child vector.
-  const centreTolerance = Math.max(diagonal * 0.0005, minorDimension * 0.0045);
-  const radiusTolerance = circle => Math.max(minorDimension * 0.0006, circle.r * 0.022);
+  // Keep separate close rings distinct. The actual short side controls the
+  // tolerance, while a tiny diagonal-relative floor absorbs numeric noise.
+  const centreTolerance = Math.max(diagonal * 1e-5, minorDimension * 0.0025);
+  const radiusTolerance = circle => Math.max(minorDimension * 0.0005, circle.r * 0.012);
   const unique = [];
 
   function addSupport(target, input) {
@@ -2799,9 +2927,15 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   // Render representative circles supported by clustered Bézier fits. The
   // complete geometry candidates remain available for analysis and metrics.
   geom.refinedCircles = circleAnalysis.circles;
+  const hasBezierCircleEvidence = (geom.rawCircleCandidates || []).length > 0;
+  const validatedRadialCircles = !hasBezierCircleEvidence && geom.isRadialArray
+    ? (geom.circles || []).filter(circle =>
+        circle && Number.isFinite(circle.cx) && Number.isFinite(circle.cy) &&
+        Number.isFinite(circle.r) && circle.r > 0 && !Number.isFinite(circle.confidence))
+    : [];
   geom.displayCircles = circleAnalysis.circles.length > 0
     ? circleAnalysis.circles
-    : (geom.circles || []);
+    : validatedRadialCircles;
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
@@ -3207,7 +3341,7 @@ function main() {
   const showInflectionSwitch = gridGrp.addSwitch("Inflection Points", initialHasInflections);
 
   attachTip(analysisProfileCombo, "Perfil sugerido por métricas geométricas: " + initialGeom.profile.suggested + ". Componentes vectoriais: " + ((componentModel && componentModel.componentCount) || 1) + "; grupos: " + ((componentModel && componentModel.groupCount) || 0) + ". A escolha automática é heurística, não reconhecimento semântico de letras.");
-  attachTip(gridModeCombo, "Smart Adaptive combina famílias de direcções suportadas por arestas e tangentes Bézier. Evita impor uma única orientação a logótipos com várias estruturas.");
+  attachTip(gridModeCombo, "Smart Adaptive combina alinhamentos estruturais, módulos e, quando faltam eixos suficientes, tangentes Bézier exactas nos extremos e pontos de controlo. Evita impor uma única orientação a logótipos com várias estruturas.");
   attachTip(nodeDisplayCombo, "Controla quais nós são destacados. A análise conserva nós distintos mesmo em curvas muito fechadas; Auto reduz apenas marcadores de baixa prioridade quando há pouco espaço.");
   attachTip(adaptiveScaleSwitch, "Reduz automaticamente marcadores e suprime linhas em áreas densas para evitar poluição visual.");
   attachTip(minNodeGapCtrl, "Distância mínima de segurança entre nós vizinhos para prevenir sobreposições.");
@@ -3485,9 +3619,7 @@ function main() {
     // 2. Curvature Arcs & Rings
     // Use the centre/radius representatives produced by refineCircleCandidates,
     // not every independently fitted Bézier segment.
-    const visibleCircles = (geom.displayCircles && geom.displayCircles.length > 0)
-      ? geom.displayCircles
-      : (geom.circles || []);
+    const visibleCircles = geom.displayCircles || [];
     if (showCirclesSwitch.value && visibleCircles.length > 0) {
       const defsArcs = [];
       for (const c of visibleCircles) {
@@ -3612,7 +3744,14 @@ function main() {
 
         const preciseAngle = initialPreciseAngle;
         const geometryDiagonal = Math.max(Number.EPSILON * 100, Math.hypot(exactBounds.width, exactBounds.height));
-        const alignmentTolerance = Math.max(geometryDiagonal * 0.0015, effectiveMergeDistance * 0.18);
+        const minorGeometrySpan = Math.max(
+          Number.EPSILON * 100,
+          Math.min(Math.abs(exactBounds.width), Math.abs(exactBounds.height))
+        );
+        const alignmentTolerance = Math.max(
+          Math.min(geometryDiagonal * 0.0015, minorGeometrySpan * 0.025),
+          Math.min(effectiveMergeDistance * 0.18, minorGeometrySpan * 0.025)
+        );
         // Only measured straight-edge families become long construction axes.
         // Curve tangents remain local Bézier evidence and must not dictate a
         // page-wide grid direction on rounded or organic lettering.
@@ -3673,8 +3812,8 @@ function main() {
         } else if (gridMode === 2) {
           // Orthogonal grid: cluster all real nodes and curve landmarks, not only
           // the anchors currently visible in the marker layer.
-          addAlignmentLineCandidates(alignmentPoints, gridOrigin, 0, alignmentTolerance, candidates, 38, "horizontal-alignment");
-          addAlignmentLineCandidates(alignmentPoints, gridOrigin, Math.PI / 2, alignmentTolerance, candidates, 38, "vertical-alignment");
+          addAlignmentLineCandidates(alignmentPoints, gridOrigin, 0, alignmentTolerance, candidates, 38, "horizontal-alignment", 2);
+          addAlignmentLineCandidates(alignmentPoints, gridOrigin, Math.PI / 2, alignmentTolerance, candidates, 38, "vertical-alignment", 2);
         } else {
           // Structural Edges: keep actual straight segments and avoid fabricating
           // diagonal chords across curved portions of the logo.
@@ -3763,6 +3902,10 @@ function main() {
           }
         }
 
+        if (gridMode === 0 && candidates.length === 0) {
+          addFallbackCurveGuideCandidates(polyCurve, geom.handles, candidates, exactBounds, 4);
+        }
+
         const cleanLines = buildCollisionSafeLines(
           candidates,
           {
@@ -3795,11 +3938,39 @@ function main() {
 
         // Consolidate overlapping line segments after clipping, including lines
         // that came from different sources or component scopes.
-        const uniqueRenderedGuides = mergeCoincidentRenderedLines(
+        let uniqueRenderedGuides = mergeCoincidentRenderedLines(
           renderedGuideSegments,
           effectiveMergeDistance,
           exactBounds
         );
+
+        // Protect the final rendering stage as well: a non-empty candidate set
+        // can still disappear after clipping or coincidence consolidation.
+        if (gridMode === 0 && uniqueRenderedGuides.length === 0) {
+          const fallbackCandidates = [];
+          addFallbackCurveGuideCandidates(polyCurve, geom.handles, fallbackCandidates, exactBounds, 4);
+          if (fallbackCandidates.length) {
+            const fallbackLines = buildCollisionSafeLines(
+              fallbackCandidates,
+              { anchors: constructionAnchors, handles: geom.handles, points: constructionLandmarks },
+              effectiveMergeDistance,
+              exactBounds
+            );
+            const fallbackRendered = [];
+            for (const line of fallbackLines) {
+              const ext = extendLineToRect(line, line.clipBounds || constructionBounds);
+              if (ext && dist(ext.p1, ext.p2) > Number.EPSILON * 100) {
+                fallbackRendered.push({ line, ext });
+              }
+            }
+            uniqueRenderedGuides = mergeCoincidentRenderedLines(
+              fallbackRendered,
+              effectiveMergeDistance,
+              exactBounds
+            );
+          }
+        }
+
         for (const item of uniqueRenderedGuides.slice(0, guideBudget)) {
           appendStyledGridLine(defs, item.line, item.ext, gridStrokeStyles, noFill);
         }
