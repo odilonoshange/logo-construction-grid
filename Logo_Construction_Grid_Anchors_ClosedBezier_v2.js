@@ -2886,7 +2886,7 @@ function main() {
   attachTip(showCirclesSwitch, "Exibe círculos concêntricos e arcos circulares de curvatura identificados.");
   attachTip(showGridSwitch, "Gera as linhas estruturais de projeção geométrica e tangentes.");
   attachTip(showHandlesSwitch, "Exibe as hastes e pontos de controlo Bézier em curvas orgânicas.");
-  attachTip(showAnchorsSwitch, "Exibe os vértices e nós vetoriais reais da geometria. Ao desactivar esta camada, deixam de ser geradas guias de alinhamento, simetria e módulos dependentes desses anchors; construções independentes de círculos mantêm-se.");
+  attachTip(showAnchorsSwitch, "Exibe os vértices e nós vetoriais reais da geometria. A camada Construction Gridlines só gera linhas enquanto existirem anchors visíveis e activos. Ao desactivar Anchor Nodes, as linhas de construção ficam ocultas; o contorno e os arcos/círculos continuam independentes.");
 
   const gridGrp = colLeft.addGroup("2. Smart Geometry & Grid");
   const analysisProfileCombo = gridGrp.addComboBox("Analysis Profile", [
@@ -3219,7 +3219,7 @@ function main() {
     }
 
     // 3. Construction Gridlines
-    if (showGridSwitch.value) {
+    if (showGridSwitch.value && activeAnchors.length > 0) {
       const defs = [];
       const gridMode = gridModeCombo.selectedIndex;
       const profileIds = ["geometric","typographic","handwriting","organic","radial"];
