@@ -330,6 +330,28 @@ function extendLineToRect(line, rect) {
   const x2 = Math.max(rect.x, rect.x + rect.width);
   const y1 = Math.min(rect.y, rect.y + rect.height);
   const y2 = Math.max(rect.y, rect.y + rect.height);
+
+  if (line.finiteSegment && line.p2) {
+    const sx = line.p1.x, sy = line.p1.y;
+    const dxSegment = line.p2.x - sx, dySegment = line.p2.y - sy;
+    let t0 = 0, t1 = 1;
+    const p = [-dxSegment, dxSegment, -dySegment, dySegment];
+    const q = [sx - x1, x2 - sx, sy - y1, y2 - sy];
+    for (let i = 0; i < 4; i++) {
+      if (Math.abs(p[i]) <= EPS) {
+        if (q[i] < 0) return null;
+      } else {
+        const ratio = q[i] / p[i];
+        if (p[i] < 0) t0 = Math.max(t0, ratio);
+        else t1 = Math.min(t1, ratio);
+        if (t0 > t1) return null;
+      }
+    }
+    return {
+      p1: { x: sx + t0 * dxSegment, y: sy + t0 * dySegment },
+      p2: { x: sx + t1 * dxSegment, y: sy + t1 * dySegment }
+    };
+  }
   const tolerance = Math.max(EPS * 10, Math.max(x2 - x1, y2 - y1) * 1e-9);
   const hits = [];
 
@@ -949,6 +971,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
           circleFit.componentId = componentId;
           circleFit.contourIndex = c;
           circleFit.segmentIndex = bIdx;
+          circleFit.contourSegmentCount = beziers.length;
           circleFit.closedContour = closedContour;
           rawCircles.push(circleFit);
         }
@@ -1445,24 +1468,32 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
   const span = referenceBounds
     ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
-  // Merge only lines that are genuinely coincident. The UI distance is a
-  // detail preference, not permission to erase distinct adjacent module axes.
   const positionTolerance = Math.max(
     span * 0.0005,
     Math.min((Number(mergeDist) || 0) * 0.08, span * 0.001)
   );
   const angleTolerance = Math.max(0.06 * DEG, Math.min(0.45 * DEG, Math.atan2(positionTolerance * 0.35, span)));
   const sorted = rawLines.slice().sort((a,b) => {
-    const scoreA = (a.importance || 0) + Math.min(20,(a.support || 0)*2);
-    const scoreB = (b.importance || 0) + Math.min(20,(b.support || 0)*2);
+    const scoreA=(a.importance||0)+Math.min(20,(a.support||0)*2);
+    const scoreB=(b.importance||0)+Math.min(20,(b.support||0)*2);
     return scoreB-scoreA;
   }).slice(0,1200);
 
+  function projectedInterval(line, angle) {
+    const ux=Math.cos(angle),uy=Math.sin(angle);
+    const p2=line.p2&&Number.isFinite(line.p2.x)&&Number.isFinite(line.p2.y)
+      ? line.p2
+      : {x:line.p1.x+ux*Math.max(span,1000),y:line.p1.y+uy*Math.max(span,1000)};
+    const a=line.p1.x*ux+line.p1.y*uy;
+    const b=p2.x*ux+p2.y*uy;
+    return {min:Math.min(a,b),max:Math.max(a,b)};
+  }
+
   for (const line of sorted) {
-    if (!line || !line.p1 || !Number.isFinite(line.p1.x) || !Number.isFinite(line.p1.y)) continue;
+    if(!line||!line.p1||!Number.isFinite(line.p1.x)||!Number.isFinite(line.p1.y))continue;
     let angle=line.angle;
-    if (!Number.isFinite(angle)) {
-      if (!line.p2 || !Number.isFinite(line.p2.x) || !Number.isFinite(line.p2.y)) continue;
+    if(!Number.isFinite(angle)){
+      if(!line.p2||!Number.isFinite(line.p2.x)||!Number.isFinite(line.p2.y))continue;
       angle=Math.atan2(line.p2.y-line.p1.y,line.p2.x-line.p1.x);
     }
     const rawAngle=angle;
@@ -1470,23 +1501,38 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
     let normalizedOffset=Number.isFinite(line.offset)?line.offset:0;
     if(Math.cos(rawAngle-angle)<0)normalizedOffset=-normalizedOffset;
     const p2=line.p2&&Number.isFinite(line.p2.x)&&Number.isFinite(line.p2.y)
-      ? line.p2
+      ? {x:line.p2.x,y:line.p2.y}
       : {x:line.p1.x+Math.cos(angle)*Math.max(span,1000),y:line.p1.y+Math.sin(angle)*Math.max(span,1000)};
     const length=dist(line.p1,p2);
     if(!Number.isFinite(length)||length<=Number.EPSILON*100)continue;
+    const finiteSegment=line.finiteSegment===true;
     const signedOffset=lineSignedNormalOffset({p1:line.p1,offset:normalizedOffset},angle);
     const scopeKey=line.scopeKey||"global";
-    const duplicate=result.some(existing=>
-      (existing.scopeKey||"global")===scopeKey &&
-      lineAngleDiff(existing.angle,angle)<=angleTolerance &&
-      Math.abs(lineSignedNormalOffset(existing,angle)-signedOffset)<=positionTolerance
-    );
+    const currentInterval=projectedInterval({p1:line.p1,p2},angle);
+
+    const duplicate=result.some(existing=>{
+      if((existing.scopeKey||"global")!==scopeKey)return false;
+      if(lineAngleDiff(existing.angle,angle)>angleTolerance)return false;
+      if(Math.abs(lineSignedNormalOffset(existing,angle)-signedOffset)>positionTolerance)return false;
+
+      // Keep disconnected collinear edges. A finite segment and a full inferred
+      // alignment are also kept separate until the post-clipping overlap pass.
+      if(finiteSegment || existing.finiteSegment){
+        if(!finiteSegment || !existing.finiteSegment)return false;
+        const interval=projectedInterval(existing,angle);
+        const gap=Math.max(0,Math.max(interval.min,currentInterval.min)-Math.min(interval.max,currentInterval.max));
+        return gap<=positionTolerance;
+      }
+      return true;
+    });
+
     if(!duplicate){
       result.push({
         p1:{x:line.p1.x,y:line.p1.y},
-        p2:{x:p2.x,y:p2.y},
+        p2,
         angle,
         offset:normalizedOffset,
+        finiteSegment,
         importance:line.importance||0,
         support:line.support||0,
         source:line.source||"geometry",
@@ -2383,11 +2429,13 @@ function refineCircleCandidates(rawCircles, bounds) {
   const radiusTolerance = circle => Math.max(minorDimension * 0.0006, circle.r * 0.022);
   const unique = [];
 
-  function addContourSupport(target, contourIndex, segmentIndex) {
+  function addContourSupport(target, contourIndex, segmentIndex, contourSegmentCount) {
     let contour = target.contourSupports.find(item => item.contourIndex === contourIndex);
     if (!contour) {
-      contour = { contourIndex, segments: [] };
+      contour = { contourIndex, segments: [], totalSegments: Math.max(1, contourSegmentCount || 1) };
       target.contourSupports.push(contour);
+    } else {
+      contour.totalSegments = Math.max(contour.totalSegments || 1, contourSegmentCount || 1);
     }
     if (!contour.segments.includes(segmentIndex)) contour.segments.push(segmentIndex);
   }
@@ -2423,7 +2471,7 @@ function refineCircleCandidates(rawCircles, bounds) {
         existing.r = (existing.r * existing.weight + input.r * weight) / total;
         existing.weight = total;
         existing.segmentIndexes.push(segmentIndex);
-        addContourSupport(existing, contourIndex, segmentIndex);
+        addContourSupport(existing, contourIndex, segmentIndex, input.contourSegmentCount);
       }
       existing.confidence = Math.max(existing.confidence, confidence);
     } else {
@@ -2434,7 +2482,7 @@ function refineCircleCandidates(rawCircles, bounds) {
         segmentIndexes: [segmentIndex],
         contourSupports: []
       };
-      addContourSupport(circle, contourIndex, segmentIndex);
+      addContourSupport(circle, contourIndex, segmentIndex, input.contourSegmentCount);
       unique.push(circle);
     }
   }
@@ -2494,9 +2542,10 @@ function refineCircleCandidates(rawCircles, bounds) {
       for (const support of circle.contourSupports) {
         let target = tier.contourSupports.find(item => item.contourIndex===support.contourIndex);
         if (!target) {
-          target = { contourIndex:support.contourIndex, segments:[] };
+          target = { contourIndex:support.contourIndex, segments:[], totalSegments:support.totalSegments || 1 };
           tier.contourSupports.push(target);
         }
+        target.totalSegments = Math.max(target.totalSegments || 1, support.totalSegments || 1);
         for (const segment of support.segments) {
           if (!target.segments.includes(segment)) target.segments.push(segment);
         }
@@ -2509,8 +2558,14 @@ function refineCircleCandidates(rawCircles, bounds) {
       tier.segmentSupport = tier.contourSupports.reduce(
         (maximum,item) => Math.max(maximum,item.segments.length),0
       );
-      tier.contourSupportCount = tier.contourSupports.filter(item => item.segments.length>=2).length;
-      return tier.segmentSupport >= 2;
+      tier.segmentCoverage = tier.contourSupports.reduce(
+        (maximum,item) => Math.max(maximum,item.segments.length / Math.max(1,item.totalSegments || 1)),0
+      );
+      tier.contourSupportCount = tier.contourSupports.filter(item =>
+        item.segments.length >= 2 &&
+        item.segments.length / Math.max(1,item.totalSegments || 1) >= 0.45
+      ).length;
+      return tier.segmentSupport >= 2 && tier.segmentCoverage >= 0.45 && tier.contourSupportCount > 0;
     });
     if (!supportedTiers.length) continue;
 
@@ -2791,28 +2846,65 @@ function addCircleFamilyConstructionCandidates(circleFamilies, output, options) 
     const hasMeasuredRelation = family.radiusRatios.length > 0 || family.radiusModuleConfidence >= 0.60;
     if (!hasMeasuredRelation) continue;
 
-    const metadata = {
-      componentId: Number.isInteger(settings.componentId) ? settings.componentId : undefined,
-      scopeKey: settings.scopeKey || undefined,
-      clipBounds: settings.clipBounds || undefined
+    const outerCircle = circles[circles.length - 1];
+    const extentRadius = outerCircle.r;
+    if (!Number.isFinite(extentRadius) || extentRadius <= 0) continue;
+
+    // Each centre family gets its own local clipping rectangle and identity.
+    // This matters when one Curve layer contains several glyphs/circular details.
+    const clipBounds = settings.clipBounds || {
+      x: family.cx - extentRadius,
+      y: family.cy - extentRadius,
+      width: extentRadius * 2,
+      height: extentRadius * 2
     };
+    const componentId = Number.isInteger(settings.componentId)
+      ? settings.componentId
+      : (Number.isInteger(family.componentId) ? family.componentId : undefined);
+    const scopeKey = settings.scopeKey ||
+      ("circle-family:" + (Number.isInteger(componentId) ? componentId : "global") +
+       ":" + family.cx.toFixed(3) + ":" + family.cy.toFixed(3));
+    const metadata = {
+      componentId,
+      scopeKey,
+      clipBounds
+    };
+
     const axisImportance = settings.importance || 64;
     const axisSource = settings.axisSource || "circle-centre-axis";
     const boundarySource = settings.boundarySource || "circle-ratio-boundary";
-    output.push(Object.assign({p1:{x:family.cx,y:family.cy},angle:0,importance:axisImportance,source:axisSource},metadata));
-    output.push(Object.assign({p1:{x:family.cx,y:family.cy},angle:Math.PI/2,importance:axisImportance,source:axisSource},metadata));
+    output.push(Object.assign({
+      p1:{x:family.cx,y:family.cy},angle:0,
+      importance:axisImportance,source:axisSource
+    },metadata));
+    output.push(Object.assign({
+      p1:{x:family.cx,y:family.cy},angle:Math.PI/2,
+      importance:axisImportance,source:axisSource
+    },metadata));
 
-    for (const circle of circles.slice(0,settings.maxRings||3)) {
-      const radius=circle.r;
-      const importance=settings.importance || (48+circle.confidence*8);
-      output.push(Object.assign({p1:{x:family.cx+radius,y:family.cy},angle:Math.PI/2,importance,source:boundarySource},metadata));
-      output.push(Object.assign({p1:{x:family.cx-radius,y:family.cy},angle:Math.PI/2,importance,source:boundarySource},metadata));
-      output.push(Object.assign({p1:{x:family.cx,y:family.cy+radius},angle:0,importance,source:boundarySource},metadata));
-      output.push(Object.assign({p1:{x:family.cx,y:family.cy-radius},angle:0,importance,source:boundarySource},metadata));
-    }
+    // One pair of outer tangency limits is enough to communicate the family's
+    // overall construction diameter; drawing four lines for every radius tier
+    // created unnecessary nested rectangles around each glyph.
+    const radius = outerCircle.r;
+    const importance = settings.importance || (48 + outerCircle.confidence * 8);
+    output.push(Object.assign({
+      p1:{x:family.cx+radius,y:family.cy},angle:Math.PI/2,
+      importance,source:boundarySource
+    },metadata));
+    output.push(Object.assign({
+      p1:{x:family.cx-radius,y:family.cy},angle:Math.PI/2,
+      importance,source:boundarySource
+    },metadata));
+    output.push(Object.assign({
+      p1:{x:family.cx,y:family.cy+radius},angle:0,
+      importance,source:boundarySource
+    },metadata));
+    output.push(Object.assign({
+      p1:{x:family.cx,y:family.cy-radius},angle:0,
+      importance,source:boundarySource
+    },metadata));
   }
 }
-
 
 function readPickerRGBA(picker, fallback) {
   try {
@@ -3440,7 +3532,7 @@ function main() {
           for (const seg of geom.straightSegments) {
             if (dist(seg.p1, seg.p2) < minGuideEdge) continue;
             if (!hasConstructionAnchorAt(seg.p1) || !hasConstructionAnchorAt(seg.p2)) continue;
-            candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, importance: 82, support: 1, source: "structural-edge" });
+            candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, finiteSegment:true, importance: 82, support: 1, source: "structural-edge" });
           }
         } else if (gridMode === 2) {
           // Orthogonal grid: cluster all real nodes and curve landmarks, not only
@@ -3452,7 +3544,7 @@ function main() {
           // diagonal chords across curved portions of the logo.
           for (const seg of geom.straightSegments) {
             if (!hasConstructionAnchorAt(seg.p1) || !hasConstructionAnchorAt(seg.p2)) continue;
-            candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, importance: 86, support: 1, source: "structural-edge" });
+            candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, finiteSegment:true, importance: 86, support: 1, source: "structural-edge" });
           }
           // Repeated endpoint alignments remain useful even in edge-focused mode.
           // Use up to two genuinely supported directions, not an arbitrary chord.
@@ -3478,17 +3570,11 @@ function main() {
         // remain in their independent layer.
         if (showModulesSwitch.value && geom.circleFamilies && geom.circleFamilies.length > 0) {
           for (const family of geom.circleFamilies) {
-            const component = (componentModel && componentModel.components || [])
-              .find(item => item.id === family.componentId);
-            if (!component || !component.bounds) continue;
             addCircleFamilyConstructionCandidates([family], candidates, {
               maxFamilies:1,
-              maxRings:2,
               minConfidence:0.78,
               importance:62,
-              componentId:family.componentId,
-              scopeKey:"component:"+family.componentId,
-              clipBounds:component.bounds
+              componentId:family.componentId
             });
           }
         }
