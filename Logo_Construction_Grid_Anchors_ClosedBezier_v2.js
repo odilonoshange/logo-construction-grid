@@ -964,7 +964,7 @@ function analyzeSmartGeometry(polyCurve, baseAnchorSize, baseHandleSize, compone
       const circleInvChord = chord > 1e-5 ? 1.0 / chord : 0;
       const legacyH1 = Math.abs(cross(dx, dy, b.c1.x - b.start.x, b.c1.y - b.start.y)) * circleInvChord;
       const legacyH2 = Math.abs(cross(dx, dy, b.c2.x - b.start.x, b.c2.y - b.start.y)) * circleInvChord;
-      const legacyStraightForCircle = (legacyH1 < 0.45 && legacyH2 < 0.45) || (dC1 < 0.5 && dC2 < 0.5);
+      const legacyStraightForCircle = legacyH1 < 0.45 && legacyH2 < 0.45;
       if (!legacyStraightForCircle) {
         const circleFit = fitCircleToBezier(b);
         if (circleFit) {
@@ -2798,7 +2798,10 @@ function enrichGeometryAnalysis(polyCurve, geom) {
   geom.circleFamilies = circleAnalysis.families;
   // Render representative circles supported by clustered Bézier fits. The
   // complete geometry candidates remain available for analysis and metrics.
-  geom.displayCircles = circleAnalysis.circles;
+  geom.refinedCircles = circleAnalysis.circles;
+  geom.displayCircles = circleAnalysis.circles.length > 0
+    ? circleAnalysis.circles
+    : (geom.circles || []);
   geom.circleRelationCount = circleAnalysis.relationCount;
   if (lineAngleDiff(primaryAngle, geom.dominantAngle) > 0.75 * DEG) {
     geom.symmetry = detectAxisSymmetry(geom.anchors, primaryAngle);
@@ -3482,7 +3485,9 @@ function main() {
     // 2. Curvature Arcs & Rings
     // Use the centre/radius representatives produced by refineCircleCandidates,
     // not every independently fitted Bézier segment.
-    const visibleCircles = geom.displayCircles || geom.circles || [];
+    const visibleCircles = (geom.displayCircles && geom.displayCircles.length > 0)
+      ? geom.displayCircles
+      : (geom.circles || []);
     if (showCirclesSwitch.value && visibleCircles.length > 0) {
       const defsArcs = [];
       for (const c of visibleCircles) {
