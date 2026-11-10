@@ -2381,10 +2381,11 @@ function refineCircleCandidates(rawCircles, bounds) {
     const rankedTiers = family.circles.slice().sort((a, b) =>
       ((b.samples || 1) * 2 + b.confidence) - ((a.samples || 1) * 2 + a.confidence)
     );
-    const supportedTiers = rankedTiers.filter(tier =>
-      (tier.samples || 1) >= 2 || tier.confidence >= 0.88
-    );
-    const selectedTiers = (supportedTiers.length ? supportedTiers : rankedTiers.slice(0, 1)).slice(0, 3);
+    // Prefer circles confirmed by multiple Bézier fits. Only use isolated
+    // high-confidence fits when the family has no repeated support at all.
+    const supportedTiers = rankedTiers.filter(tier => (tier.samples || 1) >= 2);
+    const isolatedTiers = rankedTiers.filter(tier => tier.confidence >= 0.88);
+    const selectedTiers = (supportedTiers.length ? supportedTiers : (isolatedTiers.length ? isolatedTiers : rankedTiers.slice(0, 1))).slice(0, 3);
     for (const tier of selectedTiers) {
       displayCircles.push({
         cx: family.cx, cy: family.cy, r: tier.r,
