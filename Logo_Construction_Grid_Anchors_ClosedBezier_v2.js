@@ -3531,14 +3531,26 @@ function main() {
         const profileBudget = selectedProfile === "handwriting" ? 9 : (selectedProfile === "organic" ? 12 : (selectedProfile === "typographic" ? 24 : 20));
         const baseGuideBudget = gridMode === 2 ? 28 : (gridMode === 3 ? 22 : profileBudget);
         const guideBudget = Math.max(10, Math.round(baseGuideBudget * detailFactor));
-        for (const line of cleanLines.slice(0, guideBudget)) {
+        const renderedGuideSegments = [];
+        for (const line of cleanLines) {
           const clipBounds = line.clipBounds ||
             ((line.source === "bounding-box-edge" || line.source === "bounding-box-diagonal")
               ? exactBounds
               : constructionBounds);
           const ext = extendLineToRect(line, clipBounds);
           if (!ext || dist(ext.p1, ext.p2) <= Number.EPSILON * 100) continue;
-          appendStyledGridLine(defs, line, ext, gridStrokeStyles, noFill);
+          renderedGuideSegments.push({ line, ext });
+        }
+
+        // Consolidate overlapping line segments after clipping, including lines
+        // that came from different sources or component scopes.
+        const uniqueRenderedGuides = mergeCoincidentRenderedLines(
+          renderedGuideSegments,
+          effectiveMergeDistance,
+          exactBounds
+        );
+        for (const item of uniqueRenderedGuides.slice(0, guideBudget)) {
+          appendStyledGridLine(defs, item.line, item.ext, gridStrokeStyles, noFill);
         }
 
 
