@@ -1731,8 +1731,10 @@ function addAlignmentLineCandidates(points, origin, angle, tolerance, output, ba
       if(record.isAnchor)anchorSupport++;
     }
     const alongSpan=maxAlong-minAlong;
-    if(anchorSupport<2 || alongSpan<minAlongSpan)continue;
-    if(anchorSupport===2 && alongSpan<diagonal*0.075)continue;
+    // Two points always define a line mathematically, but not necessarily a
+    // meaningful construction axis. Require three active anchors for inferred
+    // alignments; direct structural edges are handled by their own segment path.
+    if(anchorSupport<3 || alongSpan<minAlongSpan)continue;
     const support=cluster.records.length;
     rankedClusters.push({
       cluster,support,
