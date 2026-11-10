@@ -2886,7 +2886,7 @@ function main() {
   attachTip(showCirclesSwitch, "Exibe círculos concêntricos e arcos circulares de curvatura identificados.");
   attachTip(showGridSwitch, "Gera as linhas estruturais de projeção geométrica e tangentes.");
   attachTip(showHandlesSwitch, "Exibe as hastes e pontos de controlo Bézier em curvas orgânicas.");
-  attachTip(showAnchorsSwitch, "Exibe os vértices e nós vetoriais reais da geometria. A camada Construction Gridlines só gera linhas enquanto existirem anchors visíveis e activos. Ao desactivar Anchor Nodes, as linhas de construção ficam ocultas; o contorno e os arcos/círculos continuam independentes.");
+  attachTip(showAnchorsSwitch, "Controla apenas a apresentação visual dos nós. A análise das Construction Gridlines continua a usar a geometria original, mesmo quando os marcadores Anchor Nodes estão ocultos.");
 
   const gridGrp = colLeft.addGroup("2. Smart Geometry & Grid");
   const analysisProfileCombo = gridGrp.addComboBox("Analysis Profile", [
@@ -3076,20 +3076,10 @@ function main() {
     const isHandleFixed = handleScalingCombo.selectedIndex === 1;
 
     let displayAnchors = getDisplayAnchors(geom, nodeDisplayCombo.selectedIndex, minGap, effectiveAnchorSize);
-    const activeAnchors = showAnchorsSwitch.value ? displayAnchors : [];
-    const activeLandmarks = [];
-    if (showLandmarksSwitch.value) {
-      for (const landmark of geom.landmarks) {
-        if (landmark.type !== "extrema" && landmark.type !== "cusp" && landmark.type !== "stationary") continue;
-        if (geom.anchors.some(anchor => dist(anchor, landmark) <= landmarkCoincidenceTolerance)) continue;
-        activeLandmarks.push(landmark);
-      }
-    }
-    if (showInflectionSwitch.value) {
-      for (const landmark of geom.landmarks) {
-        if (landmark.type === "inflection") activeLandmarks.push(landmark);
-      }
-    }
+    // Construction analysis always uses the complete, unfiltered geometry.
+    // These collections are independent from whether marker layers are visible.
+    const constructionAnchors = geom.anchors;
+    const constructionLandmarks = geom.landmarks;
     let displayHandles = geom.handles;
 
     const stemMultipliers = [1.0, 1.5, 2.0, 3.0];
@@ -3219,7 +3209,7 @@ function main() {
     }
 
     // 3. Construction Gridlines
-    if (showGridSwitch.value && activeAnchors.length > 0) {
+    if (showGridSwitch.value && constructionAnchors.length > 0) {
       const defs = [];
       const gridMode = gridModeCombo.selectedIndex;
       const profileIds = ["geometric","typographic","handwriting","organic","radial"];
@@ -3229,7 +3219,7 @@ function main() {
 
       // Radial construction is only enabled when the selected/detected profile
       // agrees with a positively detected radial topology.
-      if (activeAnchors.length > 0 && geom.isRadialArray &&
+      if (geom.isRadialArray &&
           (gridMode === 1 || (gridMode === 0 && selectedProfile === "radial"))) {
         const innerPetals = geom.innerBand;
         const outerPetals = geom.outerBand;
@@ -3321,11 +3311,11 @@ function main() {
         // This keeps guide generation independent from marker collision controls.
         const candidates = [];
         const gridOrigin = exactCenter;
-        const alignmentPoints = activeAnchors.map(anchor => Object.assign({}, anchor, {
+        const alignmentPoints = constructionAnchors.map(anchor => Object.assign({}, anchor, {
           alignmentKind: "anchor",
           importance: anchor.importance || anchor.priority || 30
         }));
-        for (const landmark of activeLandmarks) {
+        for (const landmark of constructionLandmarks) {
           alignmentPoints.push(Object.assign({}, landmark, {
             alignmentKind: "landmark",
             importance: landmark.importance || (landmark.type === "extrema" ? 70 : 45)
@@ -3339,20 +3329,13 @@ function main() {
         const profileAlignmentPoints = selectedProfile === "typographic"
           ? alignmentPoints.filter(point => point.alignmentKind === "anchor")
           : alignmentPoints;
-        const activeGridSymmetry = activeAnchors.length >= 3
-          ? detectAxisSymmetry(activeAnchors, preciseAngle)
+        const constructionSymmetry = constructionAnchors.length >= 3
+          ? detectAxisSymmetry(constructionAnchors, preciseAngle)
           : { score: 0, axis: preciseAngle };
-        const activeModules = activeAnchors.length >= 4
-          ? detectModularSystems({
-              bounds: exactBounds,
-              anchors: activeAnchors,
-              landmarks: activeLandmarks,
-              dominantAngle: geom.dominantAngle
-            }, directionFamilies)
-          : { axes: [], confidence: 0 };
-        const activeAnchorTolerance = Math.max(geometryDiagonal * 0.0005, effectiveMergeDistance * 0.08, 0.35);
-        function hasActiveAnchorAt(point) {
-          return activeAnchors.some(anchor => dist(anchor, point) <= activeAnchorTolerance);
+        const constructionModules = geom.modules || { axes: [], confidence: 0 };
+        const anchorMatchTolerance = Math.max(geometryDiagonal * 0.0005, 0.35);
+        function hasConstructionAnchorAt(point) {
+          return constructionAnchors.some(anchor => dist(anchor, point) <= anchorMatchTolerance);
         }
 
         if (gridMode === 0) {
@@ -3380,9 +3363,6 @@ function main() {
                 );
               }
             });
-          } else if (selectedProfile !== "handwriting" && selectedProfile !== "organic") {
-            addAlignmentLineCandidates(profileAlignmentPoints, gridOrigin, preciseAngle, alignmentTolerance, candidates, 32, "dominant-alignment");
-            addAlignmentLineCandidates(profileAlignmentPoints, gridOrigin, preciseAngle + Math.PI / 2, alignmentTolerance, candidates, 29, "perpendicular-alignment");
           }
 
           // Preserve substantial straight edges. Very short edges often belong
@@ -3390,7 +3370,7 @@ function main() {
           const minGuideEdge = Math.max(6, Math.hypot(exactBounds.width, exactBounds.height) * 0.045);
           for (const seg of geom.straightSegments) {
             if (dist(seg.p1, seg.p2) < minGuideEdge) continue;
-            if (!hasActiveAnchorAt(seg.p1) || !hasActiveAnchorAt(seg.p2)) continue;
+            if (!hasConstructionAnchorAt(seg.p1) || !hasConstructionAnchorAt(seg.p2)) continue;
             candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, importance: 82, support: 1, source: "structural-edge" });
           }
         } else if (gridMode === 2) {
@@ -3402,7 +3382,7 @@ function main() {
           // Structural Edges: keep actual straight segments and avoid fabricating
           // diagonal chords across curved portions of the logo.
           for (const seg of geom.straightSegments) {
-            if (!hasActiveAnchorAt(seg.p1) || !hasActiveAnchorAt(seg.p2)) continue;
+            if (!hasConstructionAnchorAt(seg.p1) || !hasConstructionAnchorAt(seg.p2)) continue;
             candidates.push({ p1: seg.p1, p2: seg.p2, angle: seg.angle, importance: 86, support: 1, source: "structural-edge" });
           }
           // Repeated endpoint alignments remain useful even in edge-focused mode.
@@ -3414,8 +3394,6 @@ function main() {
                 candidates, 28 - index * 3, "edge-family-alignment"
               );
             });
-          } else {
-            addAlignmentLineCandidates(alignmentPoints, gridOrigin, preciseAngle, alignmentTolerance, candidates, 24, "edge-alignment");
           }
         }
 
@@ -3423,7 +3401,7 @@ function main() {
         // by default: otherwise every curve extremum can project an arbitrary
         // full-frame line and overwhelm the structural grid.
         const tangentMode = tangentSourceCombo.selectedIndex;
-        if (tangentMode >= 1 && showHandlesSwitch.value && activeAnchors.length > 0) {
+        if (tangentMode >= 1 && geom.handles.length > 0) {
           addBezierTangentCandidates(polyCurve, geom.handles, candidates, tangentMode === 2);
         }
 
@@ -3464,51 +3442,38 @@ function main() {
           }
         }
 
-        if (showSymmetrySwitch.value && activeGridSymmetry.score >= 0.70) {
+        if (showSymmetrySwitch.value && constructionSymmetry.score >= 0.70) {
           candidates.push({
             p1: exactCenter,
-            angle: activeGridSymmetry.axis,
+            angle: constructionSymmetry.axis,
             importance: 100,
             source: "symmetry-axis"
           });
         }
 
         if (showModulesSwitch.value && selectedProfile !== "handwriting" &&
-            activeAnchors.length >= 4 && activeModules.axes && activeModules.axes.length) {
-          for (const axis of activeModules.axes.slice(0, 2)) {
+            constructionAnchors.length >= 4 && constructionModules.axes && constructionModules.axes.length) {
+          for (const axis of constructionModules.axes.slice(0, 2)) {
             createModuleGridCandidates(axis, exactBounds, exactCenter, candidates, alignmentTolerance);
           }
 
           // Component-level lattices remain local to their own glyph/shape.
           // Only strong repeated spacing with sufficient independent anchors is promoted.
-          const localModuleComponents = [];
-          for (const component of (geom.componentAnalysis || [])) {
+          const localModuleComponents = (geom.componentAnalysis || [])
+            .filter(component => component.localAnchorCount >= 6 &&
+              component.localModules && component.localModules.axes &&
+              component.localModules.axes.length &&
+              component.localModules.axes[0].confidence >= 0.82 &&
+              component.localModules.axes[0].pointCount >= 6)
+            .sort((a,b) => b.localModules.axes[0].confidence - a.localModules.axes[0].confidence)
+            .slice(0,3);
+
+          for (const component of localModuleComponents) {
             const bounds = component.bounds;
             if (!bounds || !(bounds.width > 0) || !(bounds.height > 0)) continue;
-            const componentAnchors = activeAnchors.filter(anchor =>
-              Array.isArray(anchor.componentIds) && anchor.componentIds.indexOf(component.id) !== -1
-            );
-            if (componentAnchors.length < 6) continue;
-            const componentLandmarks = activeLandmarks.filter(landmark => landmark.componentId === component.id);
-            const localModules = detectModularSystems({
-              bounds,
-              anchors: componentAnchors,
-              landmarks: componentLandmarks,
-              dominantAngle: component.localDominantAngle || geom.dominantAngle
-            }, component.localDirectionFamilies || []);
-            const axis = (localModules.axes || []).find(item =>
-              item.confidence >= 0.82 && item.pointCount >= 6
-            );
-            if (axis) localModuleComponents.push({ component, axis });
-          }
-          localModuleComponents.sort((a,b) => b.axis.confidence - a.axis.confidence);
-
-          for (const item of localModuleComponents.slice(0,3)) {
-            const component = item.component;
-            const bounds = component.bounds;
             const centre = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
             createModuleGridCandidates(
-              item.axis, bounds, centre, candidates,
+              component.localModules.axes[0], bounds, centre, candidates,
               alignmentTolerance,
               {
                 maxLines:3,
@@ -3525,9 +3490,9 @@ function main() {
         const cleanLines = buildCollisionSafeLines(
           candidates,
           {
-            anchors: activeAnchors,
-            handles: showHandlesSwitch.value ? geom.handles : [],
-            points: activeLandmarks
+            anchors: constructionAnchors,
+            handles: geom.handles,
+            points: constructionLandmarks
           },
           effectiveMergeDistance,
           exactBounds
