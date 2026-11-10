@@ -1442,7 +1442,12 @@ function filterUniqueLines(rawLines, mergeDist, referenceBounds) {
   const span = referenceBounds
     ? Math.max(Number.EPSILON * 100, Math.hypot(referenceBounds.width, referenceBounds.height))
     : 1000;
-  const positionTolerance = Math.max(span * 1e-6, Number(mergeDist) || 0);
+  // Merge only lines that are genuinely coincident. The UI distance is a
+  // detail preference, not permission to erase distinct adjacent module axes.
+  const positionTolerance = Math.max(
+    span * 0.00035,
+    Math.min(Number(mergeDist) || 0, span * 0.0015)
+  );
   const angleTolerance = Math.max(0.06 * DEG, Math.min(0.45 * DEG, Math.atan2(positionTolerance * 0.35, span)));
   const sorted = rawLines.slice().sort((a,b) => {
     const scoreA = (a.importance || 0) + Math.min(20,(a.support || 0)*2);
