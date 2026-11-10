@@ -1604,69 +1604,99 @@ function mergeCoincidentRenderedLines(items, mergeDistance, referenceBounds) {
   });
   const merged = [];
 
-  function measure(item) {
-    const a = item.ext.p1, b = item.ext.p2;
-    const angle = canonicalLineAngle(Math.atan2(b.y - a.y, b.x - a.x));
-    const ux = Math.cos(angle), uy = Math.sin(angle);
-    const nx = -uy, ny = ux;
-    const mid = { x: (a.x + b.x) * 0.5, y: (a.y + b.y) * 0.5 };
+  function measure(ext, angle) {
+    const a=ext.p1,b=ext.p2;
+    const ux=Math.cos(angle),uy=Math.sin(angle);
+    const nx=-uy,ny=ux;
+    const mid={x:(a.x+b.x)*0.5,y:(a.y+b.y)*0.5};
+    const t1=a.x*ux+a.y*uy,t2=b.x*ux+b.y*uy;
     return {
-      angle, offset: mid.x * nx + mid.y * ny,
-      minT: Math.min(a.x * ux + a.y * uy, b.x * ux + b.y * uy),
-      maxT: Math.max(a.x * ux + a.y * uy, b.x * ux + b.y * uy)
+      angle,
+      offset:mid.x*nx+mid.y*ny,
+      minT:Math.min(t1,t2),
+      maxT:Math.max(t1,t2)
     };
   }
 
-  function pointAt(angle, offset, t) {
-    const ux = Math.cos(angle), uy = Math.sin(angle);
-    const nx = -uy, ny = ux;
-    return { x: ux * t + nx * offset, y: uy * t + ny * offset };
+  function pointAt(angle,offset,t) {
+    const ux=Math.cos(angle),uy=Math.sin(angle);
+    const nx=-uy,ny=ux;
+    return {x:ux*t+nx*offset,y:uy*t+ny*offset};
   }
 
-  for (const item of sorted) {
-    if (!item || !item.line || !item.ext || !item.ext.p1 || !item.ext.p2) continue;
-    const current = measure(item);
-    if (!Number.isFinite(current.minT) || !Number.isFinite(current.maxT) ||
-        current.maxT - current.minT <= Number.EPSILON * 100) continue;
+  function intervalGap(a,b) {
+    return Math.max(0,Math.max(a.minT,b.minT)-Math.min(a.maxT,b.maxT));
+  }
 
-    let match = null;
-    for (const existing of merged) {
-      const previous = existing.measure;
-      if (lineAngleDiff(previous.angle, current.angle) > angleTolerance) continue;
-      if (Math.abs(previous.offset - current.offset) > positionTolerance) continue;
-      const gap = Math.max(0, Math.max(previous.minT, current.minT) -
-        Math.min(previous.maxT, current.maxT));
-      if (gap <= positionTolerance) { match = existing; break; }
+  function rank(line) {
+    return (line.importance||0)+Math.min(20,(line.support||0)*2);
+  }
+
+  for(const item of sorted) {
+    if(!item||!item.line||!item.ext||!item.ext.p1||!item.ext.p2)continue;
+
+    const angle=canonicalLineAngle(Math.atan2(
+      item.ext.p2.y-item.ext.p1.y,
+      item.ext.p2.x-item.ext.p1.x
+    ));
+    let state=measure(item.ext,angle);
+    let stateWeight=Math.max(1,rank(item.line));
+    const matched=new Set();
+    let changed=true;
+
+    // Expand the merged interval until no previously emitted interval touches
+    // it. This makes consolidation transitive: A overlaps B, B overlaps C.
+    while(changed) {
+      changed=false;
+      for(const existing of merged) {
+        if(matched.has(existing))continue;
+        if(lineAngleDiff(existing.measure.angle,angle)>angleTolerance)continue;
+        const candidateMeasure=measure(existing.ext,angle);
+        if(Math.abs(candidateMeasure.offset-state.offset)>positionTolerance)continue;
+        if(intervalGap(candidateMeasure,state)>positionTolerance)continue;
+
+        matched.add(existing);
+        const weight=Math.max(1,rank(existing.line));
+        state.offset=(state.offset*stateWeight+candidateMeasure.offset*weight)/(stateWeight+weight);
+        stateWeight+=weight;
+        state.minT=Math.min(state.minT,candidateMeasure.minT);
+        state.maxT=Math.max(state.maxT,candidateMeasure.maxT);
+        changed=true;
+      }
     }
 
-    if (!match) {
-      merged.push({ line: item.line, ext: item.ext, measure: current });
+    if(!matched.size) {
+      merged.push({line:item.line,ext:item.ext,measure:state});
       continue;
     }
 
-    const previous = match.measure;
-    const previousRank = (match.line.importance || 0) + Math.min(20, (match.line.support || 0) * 2);
-    const currentRank = (item.line.importance || 0) + Math.min(20, (item.line.support || 0) * 2);
-    const winner = currentRank > previousRank ? item.line : match.line;
-    const previousWeight = Math.max(1, previousRank);
-    const currentWeight = Math.max(1, currentRank);
-    const offset = (previous.offset * previousWeight + current.offset * currentWeight) /
-      (previousWeight + currentWeight);
-    const angle = currentRank > previousRank ? current.angle : previous.angle;
-    const minT = Math.min(previous.minT, current.minT);
-    const maxT = Math.max(previous.maxT, current.maxT);
-
-    match.line = Object.assign({}, winner, {
-      angle, offset: 0,
-      importance: Math.max(match.line.importance || 0, item.line.importance || 0),
-      support: Math.max(match.line.support || 0, item.line.support || 0),
-      scopeKey: "merged"
+    let winner=item.line;
+    let maxRank=rank(winner);
+    let maxImportance=winner.importance||0;
+    let maxSupport=winner.support||0;
+    for(const existing of matched) {
+      const value=rank(existing.line);
+      if(value>maxRank){winner=existing.line;maxRank=value;}
+      maxImportance=Math.max(maxImportance,existing.line.importance||0);
+      maxSupport=Math.max(maxSupport,existing.line.support||0);
+    }
+    const mergedLine=Object.assign({},winner,{
+      angle,
+      offset:0,
+      importance:maxImportance,
+      support:maxSupport,
+      scopeKey:"merged"
     });
-    match.ext = { p1: pointAt(angle, offset, minT), p2: pointAt(angle, offset, maxT) };
-    match.measure = measure(match);
+    const ext={
+      p1:pointAt(angle,state.offset,state.minT),
+      p2:pointAt(angle,state.offset,state.maxT)
+    };
+
+    for(let i=merged.length-1;i>=0;i--)if(matched.has(merged[i]))merged.splice(i,1);
+    merged.push({line:mergedLine,ext,measure:measure(ext,angle)});
   }
 
-  return merged.map(item => ({ line: item.line, ext: item.ext }));
+  return merged.map(item=>({line:item.line,ext:item.ext}));
 }
 
 function positionlessTolerance(value) {
