@@ -1097,7 +1097,12 @@ function main() {
         const caption = "FEATURE " + String(index + 1).padStart(2, "0");
         const valueWidth = label.length * valueSize * 0.55;
         const captionWidth = caption.length * captionSize * 0.54;
-        const estimate = labelLayout === 1 ? valueWidth : Math.max(valueWidth, captionWidth);
+        const verticalStackHeight = labelLayout === 1
+          ? valueSize * 1.12 + Math.max(2, fontSize * 0.14)
+          : valueSize * 1.12 + captionSize * 1.12 + Math.max(2, fontSize * 0.14);
+        const estimate = feature.axis === "x"
+          ? (labelLayout === 1 ? valueWidth : Math.max(valueWidth, captionWidth))
+          : verticalStackHeight;
         const centre = (span.a[axisKey] + span.b[axisKey]) / 2;
         return {
           span,
