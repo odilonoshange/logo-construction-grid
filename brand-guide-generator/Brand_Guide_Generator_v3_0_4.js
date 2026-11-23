@@ -654,7 +654,7 @@ function main() {
   const textGrp = colRight.addGroup("Typography & Labels");
   const showTextSwitch = textGrp.addSwitch("Show Labels", true);
   const fontFamilyCombo = textGrp.addComboBox("Font Family", fontFamilies, font0Index);
-  attachTip(fontFamilyCombo, "Select an installed font family. The preview updates through the same dialog event as the other controls.");
+  attachTip(fontFamilyCombo, "The list shows installed family names. Selecting one applies it immediately to the labels in the document preview. The SDK ComboBox cannot render each list item in its own typeface.");
   const fontSizeCtrl = textGrp.addUnitValueEditor(
     "Text Size (pt)",
     UnitType.Pixel,
@@ -1160,7 +1160,7 @@ function main() {
 
       const sharedTop = bestFeature && bestFeature.axis === "x" && bestFeature.side === "top";
       const sharedRight = bestFeature && bestFeature.axis === "y" && bestFeature.side === "right";
-      const outerTier = featureLaneCount * featureLaneGap + effectiveTierGap;
+      const outerTier = Math.max(0, featureLaneCount - 1) * featureLaneGap + effectiveTierGap;
       const widthOffset = baseMeasureOffset + (sharedTop ? outerTier : 0);
       const heightOffset = baseMeasureOffset + (sharedRight ? outerTier : 0);
 
