@@ -845,6 +845,9 @@ function main() {
       // without hiding the measurement connection.
       if (clearSpaceFrame) {
         const frame = clearSpaceFrame;
+        const pathDx = endX - startX;
+        const pathDy = endY - startY;
+        const pathLength = Math.hypot(pathDx, pathDy);
         const intersections = [];
         const addIntersection = (t, x, y) => {
           if (t > 1e-4 && t < 1 - 1e-4 &&
@@ -854,36 +857,36 @@ function main() {
           }
         };
 
-        if (Math.abs(dx) > EPS) {
+        if (Math.abs(pathDx) > EPS) {
           for (const edgeX of [frame.x0, frame.x1]) {
-            const t = (edgeX - startX) / dx;
-            addIntersection(t, edgeX, startY + dy * t);
+            const t = (edgeX - startX) / pathDx;
+            addIntersection(t, edgeX, startY + pathDy * t);
           }
         }
-        if (Math.abs(dy) > EPS) {
+        if (Math.abs(pathDy) > EPS) {
           for (const edgeY of [frame.y0, frame.y1]) {
-            const t = (edgeY - startY) / dy;
-            addIntersection(t, startX + dx * t, edgeY);
+            const t = (edgeY - startY) / pathDy;
+            addIntersection(t, startX + pathDx * t, edgeY);
           }
         }
 
         intersections.sort((a, b) => a - b);
-        if (intersections.length) {
-          const breakHalf = Math.min(0.035, Math.max(2.5, guideWeight * 5.5) / len / 2);
+        if (intersections.length && pathLength > EPS) {
+          const breakHalf = Math.min(0.035, Math.max(2.5, guideWeight * 5.5) / pathLength / 2);
           let cursor = 0;
           for (const t of intersections) {
             const before = Math.max(cursor, t - breakHalf);
-            if ((before - cursor) * len > 1) {
+            if ((before - cursor) * pathLength > 1) {
               addGuideSegment(
-                startX + dx * cursor, startY + dy * cursor,
-                startX + dx * before, startY + dy * before
+                startX + pathDx * cursor, startY + pathDy * cursor,
+                startX + pathDx * before, startY + pathDy * before
               );
             }
             cursor = Math.min(1, t + breakHalf);
           }
-          if ((1 - cursor) * len > 1) {
+          if ((1 - cursor) * pathLength > 1) {
             addGuideSegment(
-              startX + dx * cursor, startY + dy * cursor,
+              startX + pathDx * cursor, startY + pathDy * cursor,
               endX, endY
             );
           }
