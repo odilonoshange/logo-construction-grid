@@ -872,7 +872,7 @@ function main() {
 
         intersections.sort((a, b) => a - b);
         if (intersections.length && pathLength > EPS) {
-          const breakHalf = Math.min(0.035, Math.max(2.5, guideWeight * 5.5) / pathLength / 2);
+          const breakHalf = Math.min(0.08, Math.max(2.5, guideWeight * 5.5) / pathLength / 2);
           let cursor = 0;
           for (const t of intersections) {
             const before = Math.max(cursor, t - breakHalf);
@@ -1159,7 +1159,7 @@ function main() {
       // show an explicitly named reference width instead of disguising it as a feature.
       const featureCount = addBestFeatureDimensions();
       if (!featureCount) {
-        addOverallWidth(b.y - baseMeasureOffset, "above", true, "REFERENCE WIDTH");
+        addOverallWidth(b.y - baseMeasureOffset, "above", true, "REFERENCE");
       }
     } else if (dimMode === 2) {
       // Combined mode separates overall measurements only on sides shared
